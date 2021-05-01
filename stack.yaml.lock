@@ -5,12 +5,16 @@
 
 packages:
 - completed:
-    hackage: wasm-1.0.0@sha256:95a5af2264da9996eb1756c09030e78f595aa2d5e62d0d671180a02d321f0d6c,2666
+    size: 58963
+    url: https://github.com/SPY/haskell-wasm/archive/54c3cfd69784ad618be8f759368545deb36b7db9.tar.gz
+    name: wasm
+    version: 1.0.1.0
+    sha256: 68520222df60466daf017b85cb83c8679a5884c247640a04320280373b6a5d8e
     pantry-tree:
-      size: 1099
-      sha256: 79a12ace3addd29c61723e08a263464b4dc1c6c2825b5490f4199c1654a55d2e
+      size: 1218
+      sha256: e15cb272f2e319cd369127b01187ac49362b9e18ca60263187e313b191305c68
   original:
-    hackage: wasm-1.0.0
+    url: https://github.com/SPY/haskell-wasm/archive/54c3cfd69784ad618be8f759368545deb36b7db9.tar.gz
 - completed:
     hackage: containers-0.5.11.0@sha256:28ad7337057442f75bc689315ab4ec7bdf5e6b2c39668f306672cecd82c02798,16685
     pantry-tree:

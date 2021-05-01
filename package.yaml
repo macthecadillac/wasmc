@@ -21,7 +21,7 @@ description:         Please see the README on GitHub at <https://github.com/gith
 
 dependencies:
 - base >= 4.7 && < 5
-- wasm == 1.0.0
+- wasm >= 1.0.0
 - x86-64bit == 0.4.6.1
 - bytestring >= 0.10.8
 

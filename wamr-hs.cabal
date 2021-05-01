@@ -1,10 +1,10 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.33.0.
+-- This file has been generated from package.yaml by hpack version 0.34.3.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 773d300b3b49831844dccf8323a69c5c54fa2c6481544b2bd88a904400286f88
+-- hash: bd7ac0b85e222d9bfc93e39c6fc4daae164f8cbb84b17c7426ae864e7727d996
 
 name:           wamr-hs
 version:        0.1.0.0
@@ -35,7 +35,7 @@ library
   build-depends:
       base >=4.7 && <5
     , bytestring >=0.10.8
-    , wasm ==1.0.0
+    , wasm >=1.0.0
     , x86-64bit ==0.4.6.1
   default-language: Haskell2010
 
@@ -50,7 +50,7 @@ executable wamr-hs-exe
       base >=4.7 && <5
     , bytestring >=0.10.8
     , wamr-hs
-    , wasm ==1.0.0
+    , wasm >=1.0.0
     , x86-64bit ==0.4.6.1
   default-language: Haskell2010
 
@@ -66,6 +66,6 @@ test-suite wamr-hs-test
       base >=4.7 && <5
     , bytestring >=0.10.8
     , wamr-hs
-    , wasm ==1.0.0
+    , wasm >=1.0.0
     , x86-64bit ==0.4.6.1
   default-language: Haskell2010

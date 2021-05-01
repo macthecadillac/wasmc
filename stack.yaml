@@ -42,7 +42,8 @@ packages:
 #   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a
 #
 extra-deps:
-- wasm-1.0.0
+- github: SPY/haskell-wasm
+  commit: 54c3cfd69784ad618be8f759368545deb36b7db9
 - containers-0.5.11.0
 - text-1.2.4.1
 - binary-0.8.8.0

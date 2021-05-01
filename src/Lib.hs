@@ -5,7 +5,7 @@ module Lib
     ) where
 
 import qualified Data.ByteString.Lazy as B
-import qualified Language.Wasm.Parser as P
+import qualified Language.Wasm as Wasm
 import Language.Wasm.Structure
 import qualified Language.Wasm.Lexer as L
 import CodeGen.X86
@@ -39,7 +39,7 @@ import Numeric.Natural
 --     (i32.const 3)
 --     (i32.add)))
 parseModule :: B.ByteString -> Either String Module
-parseModule bs = L.scanner bs >>= P.parseModule
+parseModule = Wasm.parse
 
 wasmInstrToX86 :: Instruction Natural -> Either String [Code]
 wasmInstrToX86 (IBinOp BS64 IAdd) = pure [pop rax, pop rbx, add rax rbx, push rax]
