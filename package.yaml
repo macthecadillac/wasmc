@@ -1,0 +1,51 @@
+name:                wamr-hs
+version:             0.1.0.0
+github:              "githubuser/wamr-hs"
+license:             BSD3
+author:              "Author name here"
+maintainer:          "example@example.com"
+copyright:           "2021 Author name here"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/githubuser/wasm-compiler#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- wasm == 1.0.0
+- x86-64bit == 0.4.6.1
+- bytestring >= 0.10.8
+
+library:
+  source-dirs: src
+
+executables:
+  wamr-hs-exe:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - wamr-hs
+
+tests:
+  wamr-hs-test:
+    main:                Spec.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - wamr-hs
