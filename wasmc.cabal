@@ -1,16 +1,16 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.34.3.
+-- This file has been generated from package.yaml by hpack version 0.33.0.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: bd7ac0b85e222d9bfc93e39c6fc4daae164f8cbb84b17c7426ae864e7727d996
+-- hash: c655ea46f57a3a6d5f7b2c72aac6b3f695f73e6559a990c00695716d27f91442
 
-name:           wamr-hs
+name:           wasmc
 version:        0.1.0.0
-description:    Please see the README on GitHub at <https://github.com/githubuser/wasm-compiler#readme>
-homepage:       https://github.com/githubuser/wamr-hs#readme
-bug-reports:    https://github.com/githubuser/wamr-hs/issues
+description:    Please see the README on GitHub at <https://github.com/githubuser/wasmc#readme>
+homepage:       https://github.com/githubuser/wasmc#readme
+bug-reports:    https://github.com/githubuser/wasmc/issues
 author:         Author name here
 maintainer:     example@example.com
 copyright:      2021 Author name here
@@ -23,49 +23,53 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/githubuser/wamr-hs
+  location: https://github.com/githubuser/wasmc
 
 library
   exposed-modules:
+      Instructions
       Lib
   other-modules:
-      Paths_wamr_hs
+      Paths_wasmc
   hs-source-dirs:
       src
   build-depends:
       base >=4.7 && <5
     , bytestring >=0.10.8
+    , containers
+    , mtl
     , wasm >=1.0.0
-    , x86-64bit ==0.4.6.1
   default-language: Haskell2010
 
-executable wamr-hs-exe
+executable wasmc-exe
   main-is: Main.hs
   other-modules:
-      Paths_wamr_hs
+      Paths_wasmc
   hs-source-dirs:
       app
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , bytestring >=0.10.8
-    , wamr-hs
+    , containers
+    , mtl
     , wasm >=1.0.0
-    , x86-64bit ==0.4.6.1
+    , wasmc
   default-language: Haskell2010
 
-test-suite wamr-hs-test
+test-suite wasmc-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
-      Paths_wamr_hs
+      Paths_wasmc
   hs-source-dirs:
       test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , bytestring >=0.10.8
-    , wamr-hs
+    , containers
+    , mtl
     , wasm >=1.0.0
-    , x86-64bit ==0.4.6.1
+    , wasmc
   default-language: Haskell2010

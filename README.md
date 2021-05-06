@@ -1,2 +1,2 @@
-# wamr-hs
+# wasmc
 A fucking awesome WASM compiler

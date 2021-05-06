@@ -1,3 +1,3 @@
-# Changelog for wamr-hs
+# Changelog for wasmc
 
 ## Unreleased changes

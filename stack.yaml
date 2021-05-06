@@ -48,7 +48,6 @@ extra-deps:
 - text-1.2.4.1
 - binary-0.8.8.0
 - primitive-0.7.1.0
-- x86-64bit-0.4.6.1
 
 # Override default flag values for local packages and extra-deps
 # flags: {}
