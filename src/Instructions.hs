@@ -3,31 +3,31 @@ module Instructions where
 import Data.Bits
 
 data MIPSFile = MIPSFile String [MIPSSection] [[MIPSInstruction]] -- Each list contains one function def.
-    deriving Show
+  deriving Show
 
 data MIPSSection = MIPSSection String [(String, String, String)]
-    deriving Show
+  deriving Show
 
-data MIPSInstruction = Inst MIPSOp String String String
+data MIPSInstruction = Inst MIPSOp
                      | Label String
                      | Comment String
                      | Empty
-    deriving (Eq, Show)
+                     deriving (Eq, Show)
 
 -- http://www.cs.uwm.edu/classes/cs315/Bacon/Lecture/HTML/ch05s03.html
 -- TODO: Bounds check -- safety related
 data Register = Zero
-               | At
-               | Res Int
-               | Arg Int
-               | Tmp Int
-               | Ctnt Int
-               | OS Int
-               | GP Int
-               | SP
-               | FP
-               | Ret
-    deriving (Eq, Show)
+              | At
+              | Res Int
+              | Arg Int
+              | Tmp Int
+              | Ctnt Int
+              | OS Int
+              | GP Int
+              | SP
+              | FP
+              | Ret
+              deriving (Eq, Show)
 
 data MIPSOp = OP_ADD Register Register Register
             | OP_MOVE
@@ -80,17 +80,17 @@ data MIPSOp = OP_ADD Register Register Register
             | OP_MTC0
             | OP_ADDIU Register Register Int
             | OP_SUBIU Register Register Int
-    deriving (Show, Eq)
+            deriving (Show, Eq)
 
 -- opList = [OP_ADD, OP_MOVE, OP_LI, OP_LA, OP_MUL,
---           OP_LW, OP_SW, OP_LB, OP_SB, OP_XOR, OP_DIV,
---           OP_SUB, OP_AND, OP_OR, OP_BNE, OP_BEQ,
---           OP_BGT, OP_BGE, OP_BLT, OP_BLE, OP_J,
---           OP_JR, OP_JAL, OP_JALR, OP_SLL, OP_SRL,
---           OP_REM, OP_NOT, SYSCALL, OP_ADDS, OP_MULS,
---           OP_SUBS, OP_MOVS, OP_MTC1, OP_MFC1, OP_CVT_W_S,
---           OP_CVT_S_W, OP_CEQS, OP_CLES, OP_CLTS, OP_BC1F,
---           OP_BC1T, OP_LS, OP_SS, OP_LIS, OP_MTC0]
+--       OP_LW, OP_SW, OP_LB, OP_SB, OP_XOR, OP_DIV,
+--       OP_SUB, OP_AND, OP_OR, OP_BNE, OP_BEQ,
+--       OP_BGT, OP_BGE, OP_BLT, OP_BLE, OP_J,
+--       OP_JR, OP_JAL, OP_JALR, OP_SLL, OP_SRL,
+--       OP_REM, OP_NOT, SYSCALL, OP_ADDS, OP_MULS,
+--       OP_SUBS, OP_MOVS, OP_MTC1, OP_MFC1, OP_CVT_W_S,
+--       OP_CVT_S_W, OP_CEQS, OP_CLES, OP_CLTS, OP_BC1F,
+--       OP_BC1T, OP_LS, OP_SS, OP_LIS, OP_MTC0]
 
 -- isLabel (Label _) = True
 -- isLabel _ = False
