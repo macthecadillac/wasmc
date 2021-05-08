@@ -48,8 +48,8 @@ data MIPSOp = OP_ADD Register Register Register
             | OP_MUL Register Register Register
             | OP_LW Register Natural Register
             | OP_SW Register Natural Register
-            | OP_LB Register "mem"
-            | OP_SB Register "mem"
+            | OP_LB Register String
+            | OP_SB Register String
             | OP_XOR Register Register Register
             | OP_DIV Register Register
             | OP_SUB Register Register Register
