@@ -1,6 +1,7 @@
 module Instructions where
 
 import Data.Bits
+import Numeric.Natural
 
 data MIPSFile = MIPSFile String [MIPSSection] [[MIPSInstruction]] -- Each list contains one function def.
   deriving Show
@@ -18,68 +19,79 @@ data MIPSInstruction = Inst MIPSOp
 -- TODO: Bounds check -- safety related
 data Register = Zero
               | At
-              | Res Int
-              | Arg Int
-              | Tmp Int
-              | Ctnt Int
-              | OS Int
-              | GP Int
+              | Res Natural
+              | Arg Natural
+              | Tmp Natural
+              | Save Natural
+              | GP
               | SP
               | FP
               | Ret
-              deriving (Eq, Show)
+              deriving (Eq)
+
+instance Show Register where
+  show Zero     = "$zero"
+  show At       = "$at"
+  show (Res n)  = "$v" ++ show n
+  show (Arg n)  = "$a" ++ show n
+  show (Save n) = "$s" ++ show n
+  show (Tmp n)  = "$t" ++ show n
+  show GP       = "$gp"
+  show SP       = "$sp"
+  show FP       = "$fp"
+  show Ret      = "$ra"
 
 data MIPSOp = OP_ADD Register Register Register
-            | OP_MOVE
-            | OP_LI Register Int
-            | OP_LA
-            | OP_MUL
-            | OP_LW Register Int Register
-            | OP_SW Register Int Register
-            | OP_LB
-            | OP_SB
-            | OP_XOR
-            | OP_DIV
+            | OP_MOVE Register Register
+            | OP_LI Register Natural
+            | OP_LA Register String
+            | OP_MUL Register Register Register
+            | OP_LW Register Natural Register
+            | OP_SW Register Natural Register
+            | OP_LB Register "mem"
+            | OP_SB Register "mem"
+            | OP_XOR Register Register Register
+            | OP_DIV Register Register
             | OP_SUB Register Register Register
-            | OP_AND
-            | OP_OR
-            | OP_BNE
-            | OP_BEQ
-            | OP_BGT
-            | OP_BGE
-            | OP_BLT
-            | OP_BLE
-            | OP_J
-            | OP_JR
-            | OP_JAL
-            | OP_JALR
-            | OP_SLL
-            | OP_SRL
-            | OP_REM
-            | OP_NOT
+            | OP_AND Register Register Register
+            | OP_OR Register Register Register
+            | OP_BNE Register Register Natural
+            | OP_BEQ Register Register Natural
+            | OP_BGT Register Register Natural
+            | OP_BGE Register Register Natural
+            | OP_BLT Register Register Natural
+            | OP_BLE Register Register Natural
+            | OP_J Natural
+            | OP_JR Register
+            | OP_JAL Natural
+            | OP_JALR Register
+            | OP_SLL Register Register Natural
+            | OP_SRL Register Register Natural
+            | OP_REM Register Register Register
+            | OP_NOT Register Register
             | SYSCALL
             | LIT_ASM -- Used for inlining assembly.
             -- Float operations
-            | OP_ADDS
-            | OP_MULS
-            | OP_DIVS
-            | OP_SUBS
-            | OP_MOVS
-            | OP_MTC1 -- Move to float processor.
-            | OP_MFC1 -- Move from float processor.
+            | OP_ADDS Register Register Register
+            | OP_MULS Register Register Register
+            | OP_DIVS Register Register Register
+            | OP_SUBS Register Register Register
+            | OP_MOVS Register Register
+            | OP_MTC1 Register Register-- Move to float processor.
+            | OP_MFC1 Register Register-- Move from float processor.
             | OP_CVT_W_S -- Convert float to int (word, single)
             | OP_CVT_S_W -- Convert int to float (single, word)
-            | OP_CEQS -- Set code to 1 if equal.
-            | OP_CLES -- Set code to 1 if less than or equal to
-            | OP_CLTS -- Set code to 1 if less than
+            | OP_CEQS Register Register -- Set code to 1 if equal.
+            | OP_CLES Register Register -- Set code to 1 if less than or equal to
+            | OP_CLTS Register Register -- Set code to 1 if less than
             | OP_BC1F -- Branch if code == 0
             | OP_BC1T -- Branch if code == 1
             | OP_LS -- Load single
             | OP_SS -- Store single
             | OP_LIS -- Load immediate single.
-            | OP_MTC0
-            | OP_ADDIU Register Register Int
-            | OP_SUBIU Register Register Int
+            | OP_MTC0 Register Register
+            | OP_ADDIU Register Register Natural
+            | OP_SUBIU Register Register Natural
             deriving (Show, Eq)
 
 -- opList = [OP_ADD, OP_MOVE, OP_LI, OP_LA, OP_MUL,

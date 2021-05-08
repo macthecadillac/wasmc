@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: c655ea46f57a3a6d5f7b2c72aac6b3f695f73e6559a990c00695716d27f91442
+-- hash: acaa9b299a9c7ffaf782f254f30f9b9f639a76bcc84c192ee3848b68cbef9310
 
 name:           wasmc
 version:        0.1.0.0
@@ -27,6 +27,7 @@ source-repository head
 
 library
   exposed-modules:
+      Codegen
       Instructions
       Lib
   other-modules:
