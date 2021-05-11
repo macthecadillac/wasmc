@@ -79,16 +79,16 @@ data MIPSOp = OP_ADD Register Register Register
             | OP_MOVS Register Register
             | OP_MTC1 Register Register-- Move to float processor.
             | OP_MFC1 Register Register-- Move from float processor.
-            | OP_CVT_W_S -- Convert float to int (word, single)
-            | OP_CVT_S_W -- Convert int to float (single, word)
+            | OP_CVT_W_S Register Register-- Convert float to int (word, single)
+            | OP_CVT_S_W Register Register-- Convert int to float (single, word)
             | OP_CEQS Register Register -- Set code to 1 if equal.
             | OP_CLES Register Register -- Set code to 1 if less than or equal to
             | OP_CLTS Register Register -- Set code to 1 if less than
-            | OP_BC1F -- Branch if code == 0
-            | OP_BC1T -- Branch if code == 1
-            | OP_LS -- Load single
-            | OP_SS -- Store single
-            | OP_LIS -- Load immediate single.
+            | OP_BC1F String-- Branch if code == 0
+            | OP_BC1T String-- Branch if code == 1
+            | OP_LS Register Natural -- Load single
+            | OP_SS Register Natural -- Store single
+            | OP_LIS Register Natural -- Load immediate single.
             | OP_MTC0 Register Register
             | OP_ADDIU Register Register Natural
             | OP_SUBIU Register Register Natural
