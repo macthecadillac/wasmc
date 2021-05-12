@@ -106,6 +106,27 @@ getStackOffset i = do
   ts <- maybe (fail "Unknown function index") (pure . snd) funcVarTypes
   liftEither $ varSectionSize $ L.take (fromIntegral i) ts
 
+type BinOp = Register -> Register -> Register -> MIPSOp
+type UnOp = Register -> Register -> MIPSOp
+
+mipsBinOp :: BinOp -> [MIPSInstruction]
+mipsBinOp binop = fmap Inst instrs
+  where
+    instrs = OP_LW (Tmp 0) 0 SP             -- load item from the top of the stack
+           : OP_LW (Tmp 1) 4 SP             -- load the next item
+           : binop (Tmp 0) (Tmp 0) (Tmp 1)  -- apply binop to the two items in place in $t0
+           : OP_ADDIU SP SP 4               -- deallocate one word off the stack
+           : OP_SW (Tmp 0) 0 SP             -- replace the item at the top of the stack
+           : []
+
+mipsUnOp :: UnOp -> [MIPSInstruction]
+mipsUnOp unop = fmap Inst instrs
+  where
+    instrs = OP_LW (Tmp 0) 0 SP   -- load item from the top of the stack
+           : unop (Tmp 0) (Tmp 0) -- apply binop to the two items in place in $t0
+           : OP_SW (Tmp 0) 0 SP   -- replace the item at the top of the stack
+           : []
+
 wasmInstrToMIPS :: Instruction Natural -> ExceptT String (State Env) [MIPSInstruction]
 -- below it's incorrct. just push item to stack.
 -- wasmInstrToMIPS (I32Const i) = do
@@ -115,47 +136,52 @@ wasmInstrToMIPS :: Instruction Natural -> ExceptT String (State Env) [MIPSInstru
 -- WASM instruction for const is just pushing to stack
 -- https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-instr-numeric-mathsf-const-c
 -- push to stack: sub $sp,$sp,4; sw $t2,($sp);
-wasmInstrToMIPS (I32Const i) = pure $
-  Inst <$> [OP_LI (Tmp 1) i, OP_SUBIU SP SP 4, OP_SW (Tmp 1) 0 SP]
+wasmInstrToMIPS (I32Const i) = pure $ fmap Inst instr
+  where
+    instr = OP_LI (Tmp 0) i     -- load literal into $t0
+          : OP_SUBIU SP SP 4    -- allocate stack space
+          : OP_SW (Tmp 0) 0 SP  -- save content of $t0 to stack
+          : []
 
 -- WASM type checks the 2 inputs, then performs the binop, 
 -- https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-binop-mathit-binop
--- if they're not of type t, bs32, then trap TODO
 -- popping in mips: lw $t2,($sp); addiu $sp,$sp,4
-wasmInstrToMIPS (IBinOp BS32 IAdd) = pure instrs
-  where
-    instrs = pop1 ++ pop2 ++ addBoth
-    pop1 = Inst <$> [OP_LW (Tmp 1) 0 SP, OP_ADDIU SP SP 4] 
-    pop2 = Inst <$> [OP_LW (Tmp 2) 0 SP, OP_ADDIU SP SP 4]
-    addBoth = Inst <$> [OP_ADD SP SP (Tmp 2), OP_SUB SP SP (Tmp 1), OP_SW (Tmp 1) 0 SP]
+wasmInstrToMIPS (IBinOp BS32 IAdd) = pure $ mipsBinOp OP_ADD
+wasmInstrToMIPS (IBinOp BS32 IMul) = pure $ mipsBinOp OP_MUL
 
---wasmInstrToMIPS (IBinOp BS32 IM) = pure instrs
---  where
---    instrs = pop1 ++ pop2 ++ addBoth
---    pop1 = Inst <$> [OP_LW (Tmp 1) 0 SP, OP_ADDIU SP SP 4] 
---    pop2 = Inst <$> [OP_LW (Tmp 2) 0 SP, OP_ADDIU SP SP 4]
---    addBoth = Inst <$> [OP_ADD SP SP (Tmp 2), OP_SUB SP SP (Tmp 1), OP_SW (Tmp 1) 0 SP]
-
+-- SetLocal takes whatever is at the top of the stack and puts it at the memory
+-- location defined by offset i
 wasmInstrToMIPS (SetLocal i) = do
   offset <- getStackOffset i
-  pure $ [Inst $ OP_LW (Tmp 1) offset FP]
+  let instr = OP_LW (Tmp 0) 0 SP       -- load from top of the stack
+            : OP_SW (Tmp 0) offset FP  -- store to offset location
+            : []
+  pure $ fmap Inst instr
 
+-- GetLocal takes whatever is at the memory location defined by offset i and
+-- puts it at the top of the stack
 wasmInstrToMIPS (GetLocal i) = do
   offset <- getStackOffset i
-  pure $ [Inst $ OP_SW (Tmp 1) offset FP]
+  let instr = OP_LW (Tmp 0) offset FP  -- load from top of the stack
+            : OP_SW (Tmp 0) 0 SP       -- store to offset location
+            : []
+  pure $ fmap Inst instr
 
 wasmInstrToMIPS _ = fail "Not implemented"
 
 -- compileFunction is adapted from CMIPS (compilerElement)
+-- TODO: compute the amount of stack space needed for variables using
+--       `varSectionSize` defined above and increment SP to that location before
+--       the first instruction from the function body is called.
+--       `wasmInstrToMIPS` relies on this.
+-- TODO: save-stack/restore stack -- just use the FP. It's much easier
 compileFunction :: Natural -> Function -> ExceptT String (State Env) [MIPSInstruction]
 compileFunction id (Function { funcType, localTypes, body })
   | null body = pure []
   | otherwise = do
     -- TODO handle localTypes later
     -- TODO handle funcType ????? 
-    -- TODO save stack and restore stack
     -- below, body ody ody ody ody
-    -- TODO: handling registers?
     -- TODO: add function name as comment if possible
     env    <- get
     put $ env { currentFuncIndex = id }
