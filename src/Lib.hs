@@ -1,12 +1,8 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE LambdaCase #-}
-module Lib
-    ( parseModule
-    ) where
+module Lib where
 
 import Control.Monad.State.Lazy
-import Control.Monad.Writer.Lazy
 import Control.Monad.Except
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Map as M
@@ -19,6 +15,7 @@ import Language.Wasm.Structure
 import qualified Language.Wasm.Lexer as L
 
 import Numeric.Natural
+import GHC.Natural
 
 -- Right (
 --   Module {
@@ -52,8 +49,18 @@ parseModule = Wasm.parse
 data Env = Env {
   startIndex :: Maybe Natural,  -- index of the start function
   registers :: M.Map String String,  -- maps register to varname
-  compiledFunctions :: M.Map Natural [MIPSInstruction]
+  compiledFunctions :: M.Map Natural [MIPSInstruction],
+  currentFuncIndex :: Natural,
+  functionVarTypes :: [(Natural, [ValueType])]
 }
+
+varSectionSize :: [ValueType] -> Natural
+varSectionSize = L.foldl' f 0
+  where
+    f acc I32 = 4 + acc
+    f acc F32 = 4 + acc
+    f acc I64 = 8 + acc
+    f acc F64 = 8 + acc
 
 getRegister :: String -> State Env String
 getRegister varName =
@@ -69,8 +76,8 @@ useNextRegister prefix varName = do
   -- Note: This is guaranteed to succeed because we're searching through an infinite list.
   -- That being said, the register might not always be valid, but that's another problem.
   let regs = registers env
-  let n = fromMaybe (error "Something wrong") $ L.find ((`M.notMember` regs) . (prefix ++) . show) [0..]
-  let r = prefix ++ show n
+      n = fromMaybe (error "Something wrong") $ L.find ((`M.notMember` regs) . (prefix ++) . show) [0..]
+      r = prefix ++ show n
   put $ env { registers = M.insert r varName regs }
   pure r
 
@@ -83,9 +90,9 @@ freeRegister varName = registerExists varName >>= freeIf
       reg <- getRegister varName
       -- maybe handle stack locations as well?
       put $ env { registers = M.delete reg $ registers env }
-    freeIf _ = pure ()
+    freeIf _     = pure ()
 
-wasmInstrToMIPS :: Instruction Natural -> Either String [MIPSInstruction]
+wasmInstrToMIPS :: Instruction Natural -> ExceptT String (State Env) [MIPSInstruction]
 -- wasmInstrToMIPS (IBinOp BS64 IAdd) = pure [pop rax, pop rbx, add rax rbx, push rax]
 -- wasmInstrToMIPS (IBinOp BS64 ISub) = pure [pop rax, pop rbx, sub rax rbx, push rax]
 -- below it's incorrct. just push item to stack.
@@ -110,6 +117,20 @@ wasmInstrToMIPS (IBinOp BS32 IAdd) = pure instrs
     pop2 = Inst <$> [OP_LW (Tmp 2) 0 SP, OP_ADDIU SP SP 4]
     addBoth = Inst <$> [OP_ADD SP SP (Tmp 2), OP_SUB SP SP (Tmp 1), OP_SW (Tmp 1) 0 SP]
 
+--wasmInstrToMIPS (IBinOp BS32 IM) = pure instrs
+--  where
+--    instrs = pop1 ++ pop2 ++ addBoth
+--    pop1 = Inst <$> [OP_LW (Tmp 1) 0 SP, OP_ADDIU SP SP 4] 
+--    pop2 = Inst <$> [OP_LW (Tmp 2) 0 SP, OP_ADDIU SP SP 4]
+--    addBoth = Inst <$> [OP_ADD SP SP (Tmp 2), OP_SUB SP SP (Tmp 1), OP_SW (Tmp 1) 0 SP]
+
+wasmInstrToMIPS (SetLocal i) = do
+  env <- get
+  let funcIndex = currentFuncIndex env
+      varTypes  = functionVarTypes env
+      offset    = varSectionSize $ L.concat $ snd <$> L.take (fromIntegral funcIndex) varTypes
+  pure $ Inst <$> [OP_LW (Tmp 1) offset SP]
+
 wasmInstrToMIPS _ = fail "Not implemented"
 
 -- compileFunction is adapted from CMIPS (compilerElement)
@@ -124,7 +145,8 @@ compileFunction id (Function { funcType, localTypes, body })
     -- TODO: handling registers?
     -- TODO: add function name as comment if possible
     env    <- get
-    instrs <- liftEither $ join <$> sequence (wasmInstrToMIPS <$> body)
+    put $ env { currentFuncIndex = id }
+    instrs <- join <$> sequence (wasmInstrToMIPS <$> body)
     let startID = startIndex env
         funcStart = maybe l ifMain startID
           where
@@ -139,9 +161,9 @@ compileFunction id (Function { funcType, localTypes, body })
     put $ env { compiledFunctions = M.insert id asm fs }
     pure asm
   where
-    freeMemory (Just n) | id == n = Inst <$> [OP_LI (Res 0) 10, SYSCALL]
-                        | otherwise     = []
     freeMemory Nothing  = []
+    freeMemory (Just n) | id == n   = Inst <$> [OP_LI (Res 0) 10, SYSCALL]
+                        | otherwise = []
 
 compileModule :: Module -> ExceptT String (State Env) MIPSFile 
 compileModule mod = do
@@ -152,7 +174,6 @@ compileModule mod = do
     put $ env { startIndex = (\(StartFunction n) -> n) <$> start mod}
     -- what needs to go in data? kdata? text?
     -- compile each function
-    let funcs    = functions mod
-        sections = [MIPSSection "data" [], MIPSSection "kdata" [], MIPSSection "text" []]
-    instrs <- sequence (uncurry compileFunction <$> zip [0..] funcs)
+    instrs <- sequence (uncurry compileFunction <$> zip [0..] (functions mod))
+    let sections = [MIPSSection "data" [], MIPSSection "kdata" [], MIPSSection "text" []]
     pure $ MIPSFile "yeehaw" sections $ filter (not . null) instrs

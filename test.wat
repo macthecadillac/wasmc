@@ -39,13 +39,13 @@
 
 (module
   (start $main)
-  (func $f (param $x i32) (param $z i32) (param $a i32) (result i32)
-    (local $y i32)
-    (local.get $x)
+  (func $main
+    (local $x i32)
+    (local $y f32)
+    (f64.const 1.2)
+    (f64.const 1.4)
     (local.set $y)
-    (local.get $y))
-  (func $main (result i32)
     (i32.const 1)
     (i32.const 3)
     (i32.add)
-    (call $f)))
+    (local.set $x)))
