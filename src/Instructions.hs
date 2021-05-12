@@ -2,6 +2,7 @@ module Instructions where
 
 import Data.Bits
 import Numeric.Natural
+import Data.Word
 
 data MIPSFile = MIPSFile String [MIPSSection] [[MIPSInstruction]] -- Each list contains one function def.
   deriving Show
@@ -43,11 +44,11 @@ instance Show Register where
 
 data MIPSOp = OP_ADD Register Register Register
             | OP_MOVE Register Register
-            | OP_LI Register Natural
+            | OP_LI Register Word32
             | OP_LA Register String
             | OP_MUL Register Register Register
-            | OP_LW Register Natural Register
-            | OP_SW Register Natural Register
+            | OP_LW Register Word32 Register
+            | OP_SW Register Word32 Register
             | OP_LB Register String
             | OP_SB Register String
             | OP_XOR Register Register Register
@@ -55,18 +56,18 @@ data MIPSOp = OP_ADD Register Register Register
             | OP_SUB Register Register Register
             | OP_AND Register Register Register
             | OP_OR Register Register Register
-            | OP_BNE Register Register Natural
-            | OP_BEQ Register Register Natural
-            | OP_BGT Register Register Natural
-            | OP_BGE Register Register Natural
-            | OP_BLT Register Register Natural
-            | OP_BLE Register Register Natural
-            | OP_J Natural
+            | OP_BNE Register Register Word32
+            | OP_BEQ Register Register Word32
+            | OP_BGT Register Register Word32
+            | OP_BGE Register Register Word32
+            | OP_BLT Register Register Word32
+            | OP_BLE Register Register Word32
+            | OP_J Word32
             | OP_JR Register
-            | OP_JAL Natural
+            | OP_JAL Word32
             | OP_JALR Register
-            | OP_SLL Register Register Natural
-            | OP_SRL Register Register Natural
+            | OP_SLL Register Register Word32
+            | OP_SRL Register Register Word32
             | OP_REM Register Register Register
             | OP_NOT Register Register
             | SYSCALL
@@ -86,12 +87,12 @@ data MIPSOp = OP_ADD Register Register Register
             | OP_CLTS Register Register -- Set code to 1 if less than
             | OP_BC1F String-- Branch if code == 0
             | OP_BC1T String-- Branch if code == 1
-            | OP_LS Register Natural -- Load single
-            | OP_SS Register Natural -- Store single
-            | OP_LIS Register Natural -- Load immediate single.
+            | OP_LS Register Word32 -- Load single
+            | OP_SS Register Word32 -- Store single
+            | OP_LIS Register Word32 -- Load immediate single.
             | OP_MTC0 Register Register
-            | OP_ADDIU Register Register Natural
-            | OP_SUBIU Register Register Natural
+            | OP_ADDIU Register Register Word32
+            | OP_SUBIU Register Register Word32
             deriving (Show, Eq)
 
 -- opList = [OP_ADD, OP_MOVE, OP_LI, OP_LA, OP_MUL,

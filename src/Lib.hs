@@ -9,6 +9,7 @@ import qualified Data.Map as M
 import Data.Maybe
 import qualified Data.List as L
 import Data.Tuple
+import Data.Word
 import Instructions
 import qualified Language.Wasm as Wasm
 import Language.Wasm.Structure
@@ -54,14 +55,6 @@ data Env = Env {
   functionVarTypes :: [(Natural, [ValueType])]
 }
 
-varSectionSize :: [ValueType] -> Natural
-varSectionSize = L.foldl' f 0
-  where
-    f acc I32 = 4 + acc
-    f acc F32 = 4 + acc
-    f acc I64 = 8 + acc
-    f acc F64 = 8 + acc
-
 getRegister :: String -> State Env String
 getRegister varName =
   fst . fromMaybe (error "Undefined reference.")
@@ -92,9 +85,28 @@ freeRegister varName = registerExists varName >>= freeIf
       put $ env { registers = M.delete reg $ registers env }
     freeIf _     = pure ()
 
+varSectionSize :: [ValueType] -> Either String Word32
+varSectionSize l | size <= 4294967295 = pure $ fromIntegral size
+                 | otherwise          = fail "Integer overflow"
+  where
+    size = L.foldl' f 0 l :: Integer
+    f acc I32 = 4 + acc
+    f acc F32 = 4 + acc
+    f acc I64 = 8 + acc
+    f acc F64 = 8 + acc
+
+-- get the offset of the variable corresponding to the given index from the
+-- bottom of the frame (offset from the frame pointer value).
+getStackOffset :: Natural -> ExceptT String (State Env) Word32
+getStackOffset i = do
+  env <- get
+  let funcIndex    = currentFuncIndex env
+      varTypes     = functionVarTypes env
+      funcVarTypes = L.find ((==funcIndex) . fst) varTypes
+  ts <- maybe (fail "Unknown function index") (pure . snd) funcVarTypes
+  liftEither $ varSectionSize $ L.take (fromIntegral i) ts
+
 wasmInstrToMIPS :: Instruction Natural -> ExceptT String (State Env) [MIPSInstruction]
--- wasmInstrToMIPS (IBinOp BS64 IAdd) = pure [pop rax, pop rbx, add rax rbx, push rax]
--- wasmInstrToMIPS (IBinOp BS64 ISub) = pure [pop rax, pop rbx, sub rax rbx, push rax]
 -- below it's incorrct. just push item to stack.
 -- wasmInstrToMIPS (I32Const i) = do
 --   reg <- useNextRegister "result_save" $ show i
@@ -104,7 +116,7 @@ wasmInstrToMIPS :: Instruction Natural -> ExceptT String (State Env) [MIPSInstru
 -- https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-instr-numeric-mathsf-const-c
 -- push to stack: sub $sp,$sp,4; sw $t2,($sp);
 wasmInstrToMIPS (I32Const i) = pure $
-  Inst <$> [OP_LI (Tmp 1) 1, OP_SUBIU SP SP 4, OP_SW (Tmp 1) 0 SP]
+  Inst <$> [OP_LI (Tmp 1) i, OP_SUBIU SP SP 4, OP_SW (Tmp 1) 0 SP]
 
 -- WASM type checks the 2 inputs, then performs the binop, 
 -- https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-binop-mathit-binop
@@ -125,11 +137,12 @@ wasmInstrToMIPS (IBinOp BS32 IAdd) = pure instrs
 --    addBoth = Inst <$> [OP_ADD SP SP (Tmp 2), OP_SUB SP SP (Tmp 1), OP_SW (Tmp 1) 0 SP]
 
 wasmInstrToMIPS (SetLocal i) = do
-  env <- get
-  let funcIndex = currentFuncIndex env
-      varTypes  = functionVarTypes env
-      offset    = varSectionSize $ L.concat $ snd <$> L.take (fromIntegral funcIndex) varTypes
-  pure $ Inst <$> [OP_LW (Tmp 1) offset SP]
+  offset <- getStackOffset i
+  pure $ [Inst $ OP_LW (Tmp 1) offset FP]
+
+wasmInstrToMIPS (GetLocal i) = do
+  offset <- getStackOffset i
+  pure $ [Inst $ OP_SW (Tmp 1) offset FP]
 
 wasmInstrToMIPS _ = fail "Not implemented"
 
