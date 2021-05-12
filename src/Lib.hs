@@ -169,13 +169,12 @@ wasmInstrToMIPS (GetLocal i) = do
             : []
   pure $ fmap Inst instr
 
+-- TODO: function calls: compute the amount of stack space needed for variables
+--       using `varSectionSize` and increment SP to that location before the
+--       first instruction from the function body is called.
 wasmInstrToMIPS _ = fail "Not implemented"
 
 -- compileFunction is adapted from CMIPS (compilerElement)
--- TODO: compute the amount of stack space needed for variables using
---       `varSectionSize` defined above and increment SP to that location before
---       the first instruction from the function body is called.
---       `wasmInstrToMIPS` relies on this.
 -- TODO: save-stack/restore stack -- just use the FP. It's much easier
 compileFunction :: Natural -> Function -> ExceptT String (State Env) [MIPSInstruction]
 compileFunction id (Function { funcType, localTypes, body })
