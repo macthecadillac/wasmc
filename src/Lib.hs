@@ -155,6 +155,7 @@ wasmInstrToMIPS (SetLocal i) = do
   offset <- getStackOffset i
   let instr = OP_LW (Tmp 0) 0 SP       -- load from top of the stack
             : OP_SW (Tmp 0) offset FP  -- store to offset location
+            : OP_ADDIU SP SP 4         -- deallocate one word
             : []
   pure $ fmap Inst instr
 
@@ -162,8 +163,9 @@ wasmInstrToMIPS (SetLocal i) = do
 -- puts it at the top of the stack
 wasmInstrToMIPS (GetLocal i) = do
   offset <- getStackOffset i
-  let instr = OP_LW (Tmp 0) offset FP  -- load from top of the stack
-            : OP_SW (Tmp 0) 0 SP       -- store to offset location
+  let instr = OP_LW (Tmp 0) offset FP  -- load from memory location
+            : OP_SUBIU SP SP 4         -- allocate stack space
+            : OP_SW (Tmp 0) 0 SP       -- store to the top of the stack
             : []
   pure $ fmap Inst instr
 
