@@ -107,25 +107,32 @@ getStackOffset i = do
   liftEither $ varSectionSize $ L.take (fromIntegral i) ts
 
 type BinOp = Register -> Register -> Register -> MIPSOp
-type UnOp = Register -> Register -> MIPSOp
+type UnOp  = Register -> Register -> MIPSOp
+-- type RRWOp = Register -> Register -> Word32 -> MIPSOp
 
-mipsBinOp :: BinOp -> [MIPSInstruction]
+mipsBinOp ::  BinOp -> [MIPSInstruction]
 mipsBinOp binop = fmap Inst instrs
   where
-    instrs = OP_LW (Tmp 0) 0 SP             -- load item from the top of the stack
-           : OP_LW (Tmp 1) 4 SP             -- load the next item
-           : binop (Tmp 0) (Tmp 0) (Tmp 1)  -- apply binop to the two items in place in $t0
-           : OP_ADDIU SP SP 4               -- deallocate one word off the stack
-           : OP_SW (Tmp 0) 0 SP             -- replace the item at the top of the stack
-           : []
+    instrs = [OP_LW (Tmp 0) 0 SP             -- load item from the top of the stack
+            , OP_LW (Tmp 1) 4 SP             -- load the next item
+            , binop (Tmp 0) (Tmp 0) (Tmp 1)  -- apply binop to the two items in place in $t0
+            , OP_ADDIU SP SP 4               -- deallocate one word off the stack
+            , OP_SW (Tmp 0) 0 SP]            -- replace the item at the top of the stack
+  
+-- mipsOpRRW :: RRWOp -> [MIPSInstruction]
+-- mipsOpRRW op = fmap Inst instrs
+--   where
+--     instrs = [OP_LW (Tmp 0) 0 SP             -- load item from the top of the stack
+--             , OP_LW (Tmp 1) 4 SP             -- load the next item
+--             , op (Tmp 0) (Tmp 0) 
+--     ]
 
 mipsUnOp :: UnOp -> [MIPSInstruction]
 mipsUnOp unop = fmap Inst instrs
   where
-    instrs = OP_LW (Tmp 0) 0 SP   -- load item from the top of the stack
-           : unop (Tmp 0) (Tmp 0) -- apply binop to the two items in place in $t0
-           : OP_SW (Tmp 0) 0 SP   -- replace the item at the top of the stack
-           : []
+    instrs = [OP_LW (Tmp 0) 0 SP   -- load item from the top of the stack
+            , unop (Tmp 0) (Tmp 0) -- apply unop to the item in place in $t0
+            , OP_SW (Tmp 0) 0 SP]  -- replace the item at the top of the stack
 
 wasmInstrToMIPS :: Instruction Natural -> ExceptT String (State Env) [MIPSInstruction]
 -- below it's incorrct. just push item to stack.
@@ -138,47 +145,69 @@ wasmInstrToMIPS :: Instruction Natural -> ExceptT String (State Env) [MIPSInstru
 -- push to stack: sub $sp,$sp,4; sw $t2,($sp);
 wasmInstrToMIPS (I32Const i) = pure $ fmap Inst instr
   where
-    instr = OP_LI (Tmp 0) i     -- load literal into $t0
-          : OP_SUBIU SP SP 4    -- allocate stack space
-          : OP_SW (Tmp 0) 0 SP  -- save content of $t0 to stack
-          : []
+    instr = [OP_LI (Tmp 0) i      -- load literal into $t0
+           , OP_LI (Tmp 8) 4
+           , OP_SUB SP SP (Tmp 8) -- allocate stack space
+           , OP_SW (Tmp 0) 0 SP]  -- save content of $t0 to stack
 
 -- WASM type checks the 2 inputs, then performs the binop, 
 -- https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-binop-mathit-binop
 -- popping in mips: lw $t2,($sp); addiu $sp,$sp,4
-wasmInstrToMIPS (IBinOp BS32 IAdd) = pure $ mipsBinOp OP_ADD
-wasmInstrToMIPS (IBinOp BS32 IMul) = pure $ mipsBinOp OP_MUL
+wasmInstrToMIPS (IBinOp BS32 IAdd)  = pure $ mipsBinOp OP_ADD
+wasmInstrToMIPS (IBinOp BS32 ISub)  = pure $ mipsBinOp OP_SUB
+wasmInstrToMIPS (IBinOp BS32 IMul)  = pure $ mipsBinOp OP_MUL
+wasmInstrToMIPS (IBinOp BS32 IDivS) = pure $ mipsBinOp OP_DIVS
+wasmInstrToMIPS (IBinOp BS32 IDivU) = pure $ mipsUnOp OP_DIV
+wasmInstrToMIPS (IBinOp BS32 IRemU) = pure $ mipsBinOp OP_REM
+wasmInstrToMIPS (IBinOp BS32 IAnd)  = pure $ mipsBinOp OP_AND
+wasmInstrToMIPS (IBinOp BS32 IOr)   = pure $ mipsBinOp OP_OR
+wasmInstrToMIPS (IBinOp BS32 IXor)  = pure $ mipsBinOp OP_XOR
+wasmInstrToMIPS (IBinOp BS32 IShl)  = pure $ mipsBinOp OP_SLLV
+wasmInstrToMIPS (IBinOp BS32 IShrU) = pure $ mipsBinOp OP_SRLV
+--- rotate shift TODO
+wasmInstrToMIPS (IRelOp BS32 IEq)   = pure $ mipsBinOp OP_SEQ
+wasmInstrToMIPS (IRelOp BS32 INe)   = pure $ mipsBinOp OP_SNE
+wasmInstrToMIPS (IRelOp BS32 IGtS)  = pure $ mipsBinOp OP_SGT
+wasmInstrToMIPS (IRelOp BS32 IGeS)  = pure $ mipsBinOp OP_SGE
+wasmInstrToMIPS (IRelOp BS32 ILtS)  = pure $ mipsBinOp OP_SLT
+wasmInstrToMIPS (IRelOp BS32 ILeS)  = pure $ mipsBinOp OP_SLE
+wasmInstrToMIPS (IRelOp BS32 IGtU)  = pure $ mipsBinOp OP_SGTU
+wasmInstrToMIPS (IRelOp BS32 IGeU)  = pure $ mipsBinOp OP_SGEU
+wasmInstrToMIPS (IRelOp BS32 ILtU)  = pure $ mipsBinOp OP_SLTU
+wasmInstrToMIPS (IRelOp BS32 ILeU)  = pure $ mipsBinOp OP_SLEU
+
+-- wasmInstrToMIPS (IUnOp BS32 IClz)   = pure $ mipsUnOp OP_CL
+
 
 -- SetLocal takes whatever is at the top of the stack and puts it at the memory
 -- location defined by offset i
 wasmInstrToMIPS (SetLocal i) = do
   offset <- getStackOffset i
-  let instr = OP_LW (Tmp 0) 0 SP       -- load from top of the stack
-            : OP_SW (Tmp 0) offset FP  -- store to offset location
-            : OP_ADDIU SP SP 4         -- deallocate one word
-            : []
+  let instr = [OP_LW (Tmp 0) 0 SP       -- load from top of the stack
+             , OP_SW (Tmp 0) offset FP  -- store to offset location
+             , OP_ADDIU SP SP 4]        -- deallocate one word
   pure $ fmap Inst instr
 
 -- GetLocal takes whatever is at the memory location defined by offset i and
 -- puts it at the top of the stack
 wasmInstrToMIPS (GetLocal i) = do
   offset <- getStackOffset i
-  let instr = OP_LW (Tmp 0) offset FP  -- load from memory location
-            : OP_SUBIU SP SP 4         -- allocate stack space
-            : OP_SW (Tmp 0) 0 SP       -- store to the top of the stack
-            : []
+  let instr = [OP_LW (Tmp 0) offset FP  -- load from memory location
+             , OP_LI (Tmp 1) 4
+             , OP_SUB SP SP (Tmp 1)     -- allocate stack space
+             , OP_SW (Tmp 0) 0 SP]      -- store to the top of the stack
   pure $ fmap Inst instr
+
+wasmInstrToMIPS (Call i) = pure [Inst $ OP_JAL $ "func" ++ show i ++ "start"]
 
 wasmInstrToMIPS _ = fail "Not implemented"
 
 -- compileFunction is adapted from CMIPS (compilerElement)
 compileFunction :: Natural -> Function -> ExceptT String (State Env) [MIPSInstruction]
-compileFunction id (Function { funcType, localTypes, body })
+compileFunction id Function { funcType, localTypes, body }
   | null body = pure []
   | otherwise = do
     -- TODO handle localTypes later
-    -- TODO handle funcType ????? 
-    -- below, body ody ody ody ody
     -- TODO: add function name as comment if possible
     env    <- get
     put $ env { currentFuncIndex = id }
@@ -191,38 +220,38 @@ compileFunction id (Function { funcType, localTypes, body })
             ifMain n | n == id   = "main"
                      | otherwise = l
         funcEnd = "func" ++ show id ++ "end"
-        allocateStackFrame = fmap Inst
-                           $ OP_LW (Tmp 9) 0 FP         -- load the frame pointer
-                           : OP_SUBIU SP SP 4           -- allocate stack space
-                           : OP_SW (Tmp 9) 0 SP         -- save base of current stack frame
-                           : OP_SUBIU SP SP 4           -- allocate stack frame
-                           : OP_MOVE FP SP              -- bump frame pointer
-                           : OP_SUBIU SP SP varSecSize  -- allocate for variables
-                           : []
-        restoreStackFrame = fmap Inst
-                          $ OP_MOVE SP FP      -- deallocate all variables
-                          : OP_ADDIU SP SP 4   -- point at cell with previous mem location
-                          : OP_LW (Tmp 9) 0 SP -- load base of the previous stack frame
-                          : OP_SW (Tmp 9) 0 FP -- reset frame pointer
-                          : OP_ADDIU SP SP 4   -- deallocate one word
-                          : []
+        -- FIXME: there's probably an off-by-one error somewhere here
+        allocateStackFrame = Inst <$>
+                             [OP_LI (Tmp 8) 4
+                            , OP_SUB SP SP (Tmp 8)        -- allocate stack space
+                            , OP_SW (Tmp 9) 0 SP          -- save base of current stack frame
+                            , OP_SUB SP SP (Tmp 8)        -- allocate stack frame
+                            , OP_MOVE FP SP               -- bump frame pointer
+                            -- add params
+                            , OP_LI (Tmp 8) varSecSize
+                            , OP_SUB SP SP (Tmp 8)]  -- allocate for variables
+        restoreStackFrame = Inst <$> 
+                            [OP_MOVE SP FP       -- deallocate all variables
+                           , OP_ADDIU SP SP 4    -- point at cell with previous mem location
+                           , OP_LW (Tmp 9) 0 SP  -- load base of the previous stack frame
+                           , OP_SW (Tmp 9) 0 FP  -- reset frame pointer
+                           , OP_ADDIU SP SP 4 ]  -- deallocate one word
 
-        body_ = instrs ++ [Empty, Label funcEnd]
         asm = Label funcStart :
               allocateStackFrame ++
-              body_ ++
+              instrs ++
               restoreStackFrame ++
-              freeMemory startID ++
-              [Inst $ OP_JR Ret]
+              [Empty, Label funcEnd] ++
+              cleanup startID
         fs = compiledFunctions env
     put $ env { compiledFunctions = M.insert id asm fs }
     pure asm
   where
-    freeMemory Nothing  = []
-    freeMemory (Just n) | id == n   = Inst <$> [OP_LI (Res 0) 10, SYSCALL]
-                        | otherwise = []
+    cleanup Nothing  = []
+    cleanup (Just n) | id == n   = Inst <$> [OP_LI (Res 0) 10, SYSCALL]
+                     | otherwise = [Inst $ OP_JR RA]
 
-compileModule :: Module -> ExceptT String (State Env) MIPSFile 
+compileModule :: Module -> ExceptT String (State Env) MIPSFile
 compileModule mod = do
     -- TODO: arguments from types?????
     -- TODO: literally everything else. what even is a table

@@ -27,7 +27,7 @@ data Register = Zero
               | GP
               | SP
               | FP
-              | Ret
+              | RA
               deriving (Eq)
 
 instance Show Register where
@@ -40,7 +40,7 @@ instance Show Register where
   show GP       = "$gp"
   show SP       = "$sp"
   show FP       = "$fp"
-  show Ret      = "$ra"
+  show RA       = "$ra"
 
 data MIPSOp = OP_ADD Register Register Register
             | OP_MOVE Register Register
@@ -62,13 +62,27 @@ data MIPSOp = OP_ADD Register Register Register
             | OP_BGE Register Register Word32
             | OP_BLT Register Register Word32
             | OP_BLE Register Register Word32
+            | OP_SEQ Register Register Register
+            | OP_SGE Register Register Register
+            | OP_SGT Register Register Register
+            | OP_SLE Register Register Register
+            | OP_SLT Register Register Register
+            | OP_SNE Register Register Register
+            | OP_SGEU Register Register Register
+            | OP_SGTU Register Register Register
+            | OP_SLEU Register Register Register
+            | OP_SLTU Register Register Register
             | OP_J Word32
             | OP_JR Register
-            | OP_JAL Word32
+            | OP_JAL String
             | OP_JALR Register
-            | OP_SLL Register Register Word32
-            | OP_SRL Register Register Word32
+            | OP_SLLV Register Register Register
+            -- | OP_SLL Register Register Word32
+            | OP_SRLV Register Register Register
+            | OP_ROL 
+            -- | OP_SRL Register Register Word32
             | OP_REM Register Register Register
+            -- | OP_CLZ Register
             | OP_NOT Register Register
             | SYSCALL
             | LIT_ASM -- Used for inlining assembly.
@@ -92,7 +106,6 @@ data MIPSOp = OP_ADD Register Register Register
             | OP_LIS Register Word32 -- Load immediate single.
             | OP_MTC0 Register Register
             | OP_ADDIU Register Register Word32
-            | OP_SUBIU Register Register Word32
             deriving (Show, Eq)
 
 -- opList = [OP_ADD, OP_MOVE, OP_LI, OP_LA, OP_MUL,

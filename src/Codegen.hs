@@ -2,6 +2,7 @@ module Codegen where
 
 import Data.Char (isAlpha)
 import qualified Data.List as L
+import Data.Maybe
 import Data.Word
 
 import Instructions
@@ -40,7 +41,13 @@ instance Show ArgType where
   show (S s) = s
 
 make :: String -> [ArgType] -> String
-make name l = name ++ " " ++ L.intercalate ", " (show <$> l)
+make name l = name ++ " " ++ L.intercalate "," (show <$> l)
+
+makeP :: String -> [ArgType] -> String
+makeP name [] = name
+makeP name l  = name ++ " " ++ L.intercalate "," (show <$> reverse rest) ++ "(" ++ show last_ ++ ")"
+  where
+    (last_, rest) = fromJust $ L.uncons $ reverse l
 
 generateInstruction :: MIPSInstruction -> String
 generateInstruction Empty = ""
@@ -53,8 +60,8 @@ generateInstruction (Inst    (OP_MOVE    rx ry))    = make "move"    [R rx, R ry
 generateInstruction (Inst    (OP_LI      rx iy))    = make "li"      [R rx, I iy]
 generateInstruction (Inst    (OP_LA      rx sy))    = make "la"      [R rx, S sy]
 generateInstruction (Inst    (OP_MUL     rx ry rz)) = make "mul"     [R rx, R ry, R rz]
-generateInstruction (Inst    (OP_LW      rx iy rz)) = make "lw"      [R rx, I iy, R rz]
-generateInstruction (Inst    (OP_SW      rx iy rz)) = make "sw"      [R rx, I iy, R rz]
+generateInstruction (Inst    (OP_LW      rx iy rz)) = makeP "lw"     [R rx, I iy, R rz]
+generateInstruction (Inst    (OP_SW      rx iy rz)) = makeP "sw"     [R rx, I iy, R rz]
 generateInstruction (Inst    (OP_LB      rx sy))    = make "lb"      [R rx, S sy]
 generateInstruction (Inst    (OP_SB      rx sy))    = make "sb"      [R rx, S sy]
 generateInstruction (Inst    (OP_XOR     rx ry rz)) = make "xor"     [R rx, R ry, R rz]
@@ -68,12 +75,22 @@ generateInstruction (Inst    (OP_BGT     rx ry nz)) = make "bgt"     [R rx, R ry
 generateInstruction (Inst    (OP_BGE     rx ry nz)) = make "bge"     [R rx, R ry, I nz]
 generateInstruction (Inst    (OP_BLT     rx ry nz)) = make "blt"     [R rx, R ry, I nz]
 generateInstruction (Inst    (OP_BLE     rx ry nz)) = make "ble"     [R rx, R ry, I nz]
+generateInstruction (Inst    (OP_SEQ     rx ry rz)) = make "seq"     [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SGE     rx ry rz)) = make "sge"     [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SGT     rx ry rz)) = make "sgt"     [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SLE     rx ry rz)) = make "sle"     [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SLT     rx ry rz)) = make "slt"     [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SNE     rx ry rz)) = make "sne"     [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SGEU    rx ry rz)) = make "sgeu"    [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SGTU    rx ry rz)) = make "sgtu"    [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SLEU    rx ry rz)) = make "sleu"    [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SLTU    rx ry rz)) = make "sltu"    [R rx, R ry, R rz]
 generateInstruction (Inst    (OP_J       nx))       = make "j"       [I nx]
 generateInstruction (Inst    (OP_JR      rx))       = make "jr"      [R rx]
-generateInstruction (Inst    (OP_JAL     nx))       = make "jal"     [I nx]
+generateInstruction (Inst    (OP_JAL     sx))       = make "jal"     [S sx]
 generateInstruction (Inst    (OP_JALR    rx))       = make "jalr"    [R rx]
-generateInstruction (Inst    (OP_SLL     rx ry nz)) = make "sll"     [R rx, R ry, I nz]
-generateInstruction (Inst    (OP_SRL     rx ry nz)) = make "srl"     [R rx, R ry, I nz]
+generateInstruction (Inst    (OP_SLLV    rx ry rz)) = make "sllv"    [R rx, R ry, R rz]
+generateInstruction (Inst    (OP_SRLV    rx ry rz)) = make "srlv"    [R rx, R ry, R rz]
 generateInstruction (Inst    (OP_REM     rx ry rz)) = make "rem"     [R rx, R ry, R rz]
 generateInstruction (Inst    (OP_NOT     rx ry))    = make "not"     [R rx, R ry]
 generateInstruction (Inst    (OP_ADDS    rx ry rz)) = make "add.s"   [R rx, R ry, R rz]
@@ -95,4 +112,3 @@ generateInstruction (Inst    (OP_SS      rx iy))    = make "s.s"     [R rx, I iy
 generateInstruction (Inst    (OP_LIS     rx iy))    = make "li.s"    [R rx, I iy]
 generateInstruction (Inst    (OP_MTC0    rx ry))    = make "mtc0"    [R rx, R ry]
 generateInstruction (Inst    (OP_ADDIU   rx ry nz)) = make "addiu"   [R rx, R ry, I nz]
-generateInstruction (Inst    (OP_SUBIU   rx ry nz)) = make "subiu"   [R rx, R ry, I nz]
