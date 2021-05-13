@@ -169,13 +169,9 @@ wasmInstrToMIPS (GetLocal i) = do
             : []
   pure $ fmap Inst instr
 
--- TODO: function calls: compute the amount of stack space needed for variables
---       using `varSectionSize` and increment SP to that location before the
---       first instruction from the function body is called.
 wasmInstrToMIPS _ = fail "Not implemented"
 
 -- compileFunction is adapted from CMIPS (compilerElement)
--- TODO: save-stack/restore stack -- just use the FP. It's much easier
 compileFunction :: Natural -> Function -> ExceptT String (State Env) [MIPSInstruction]
 compileFunction id (Function { funcType, localTypes, body })
   | null body = pure []
@@ -186,7 +182,8 @@ compileFunction id (Function { funcType, localTypes, body })
     -- TODO: add function name as comment if possible
     env    <- get
     put $ env { currentFuncIndex = id }
-    instrs <- join <$> sequence (wasmInstrToMIPS <$> body)
+    instrs     <- join <$> sequence (wasmInstrToMIPS <$> body)
+    varSecSize <- getStackOffset 0  -- FIXME: watch out for off-by-one
     let startID = startIndex env
         funcStart = maybe l ifMain startID
           where
@@ -194,9 +191,29 @@ compileFunction id (Function { funcType, localTypes, body })
             ifMain n | n == id   = "main"
                      | otherwise = l
         funcEnd = "func" ++ show id ++ "end"
+        allocateStackFrame = fmap Inst
+                           $ OP_LW (Tmp 9) 0 FP         -- load the frame pointer
+                           : OP_SUBIU SP SP 4           -- allocate stack space
+                           : OP_SW (Tmp 9) 0 SP         -- save base of current stack frame
+                           : OP_SUBIU SP SP 4           -- allocate stack frame
+                           : OP_MOVE FP SP              -- bump frame pointer
+                           : OP_SUBIU SP SP varSecSize  -- allocate for variables
+                           : []
+        restoreStackFrame = fmap Inst
+                          $ OP_MOVE SP FP      -- deallocate all variables
+                          : OP_ADDIU SP SP 4   -- point at cell with previous mem location
+                          : OP_LW (Tmp 9) 0 SP -- load base of the previous stack frame
+                          : OP_SW (Tmp 9) 0 FP -- reset frame pointer
+                          : OP_ADDIU SP SP 4   -- deallocate one word
+                          : []
 
         body_ = instrs ++ [Empty, Label funcEnd]
-        asm = Label funcStart : body_ ++ freeMemory startID ++ [Inst $ OP_JR Ret]
+        asm = Label funcStart :
+              allocateStackFrame ++
+              body_ ++
+              restoreStackFrame ++
+              freeMemory startID ++
+              [Inst $ OP_JR Ret]
         fs = compiledFunctions env
     put $ env { compiledFunctions = M.insert id asm fs }
     pure asm
