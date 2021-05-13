@@ -204,22 +204,19 @@ wasmInstrToMIPS _ = fail "Not implemented"
 
 -- compileFunction is adapted from CMIPS (compilerElement)
 compileFunction :: Natural -> Function -> ExceptT String (State Env) [MIPSInstruction]
-compileFunction id Function { funcType, localTypes, body }
+compileFunction idx Function { funcType, localTypes, body }
   | null body = pure []
   | otherwise = do
     -- TODO handle localTypes later
     -- TODO: add function name as comment if possible
     env        <- get
-    put $ env { currentFuncIndex = id }
+    put $ env { currentFuncIndex = idx }
     instrs     <- join <$> traverse wasmInstrToMIPS body
     varSecSize <- getStackOffset 0  -- FIXME: watch out for off-by-one
     let startID = startIndex env
-        funcStart = maybe l ifMain startID
-          where
-            l = "func" ++ show id ++ "start"
-            ifMain n | n == id   = "main"
-                     | otherwise = l
-        funcEnd = "func" ++ show id ++ "end"
+        funcStart = maybe ("func" ++ show idx ++ "start") id
+          $ const "main" <$> (guard . (==idx) =<< startID)
+        funcEnd = "func" ++ show idx ++ "end"
         -- FIXME: there's probably an off-by-one error somewhere here
         allocateStackFrame = Inst <$>
                              [OP_LI (Tmp 8) 4
@@ -244,11 +241,11 @@ compileFunction id Function { funcType, localTypes, body }
               [Empty, Label funcEnd] ++
               cleanup startID
         fs = compiledFunctions env
-    put $ env { compiledFunctions = M.insert id asm fs }
+    put $ env { compiledFunctions = M.insert idx asm fs }
     pure asm
   where
     cleanup Nothing  = []
-    cleanup (Just n) | id == n   = Inst <$> [OP_LI (Res 0) 10, SYSCALL]
+    cleanup (Just n) | idx == n  = Inst <$> [OP_LI (Res 0) 10, SYSCALL]
                      | otherwise = [Inst $ OP_JR RA]
 
 compileModule :: Module -> ExceptT String (State Env) MIPSFile
