@@ -209,9 +209,9 @@ compileFunction id Function { funcType, localTypes, body }
   | otherwise = do
     -- TODO handle localTypes later
     -- TODO: add function name as comment if possible
-    env    <- get
+    env        <- get
     put $ env { currentFuncIndex = id }
-    instrs     <- join <$> sequence (wasmInstrToMIPS <$> body)
+    instrs     <- join <$> traverse wasmInstrToMIPS body
     varSecSize <- getStackOffset 0  -- FIXME: watch out for off-by-one
     let startID = startIndex env
         funcStart = maybe l ifMain startID
@@ -260,6 +260,6 @@ compileModule mod = do
     put $ env { startIndex = (\(StartFunction n) -> n) <$> start mod}
     -- what needs to go in data? kdata? text?
     -- compile each function
-    instrs <- sequence (uncurry compileFunction <$> zip [0..] (functions mod))
+    instrs <- traverse (uncurry compileFunction) $ zip [0..] $ functions mod
     let sections = [MIPSSection "data" [], MIPSSection "kdata" [], MIPSSection "text" []]
     pure $ MIPSFile "yeehaw" sections $ filter (not . null) instrs
