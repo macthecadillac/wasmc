@@ -25,6 +25,9 @@ dependencies:
 - bytestring >= 0.10.8
 - mtl
 - containers
+- llvm-hs-pure
+- llvm-hs-pretty
+- text
 
 library:
   source-dirs: src
