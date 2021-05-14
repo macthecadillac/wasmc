@@ -24,6 +24,7 @@ dependencies:
 - wasm >= 1.0.0
 - bytestring >= 0.10.8
 - mtl
+- binary
 - containers
 - llvm-hs-pure
 - llvm-hs-pretty

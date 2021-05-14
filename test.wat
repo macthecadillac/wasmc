@@ -37,15 +37,28 @@
 ;;   (func (export "_start") 
 ;;     (local $___IMPL_RET i32)))
 
+;; (module
+;;   (start $main)
+;;   (func $main
+;;     (local $x i32)
+;;     ;; (local $y f32)
+;;     ;; (f64.const 1.2)
+;;     ;; (f64.const 1.4)
+;;     ;; (local.set $y)
+;;     (i32.const 1)
+;;     (i32.const 3)
+;;     (i32.add)
+;;     (local.set $x)))
+
 (module
   (start $main)
-  (func $main
-    (local $x i32)
-    ;; (local $y f32)
-    ;; (f64.const 1.2)
-    ;; (f64.const 1.4)
-    ;; (local.set $y)
-    (i32.const 1)
+  (func $main (result i32)
     (i32.const 3)
+    (i32.const 2)
     (i32.add)
-    (local.set $x)))
+    (i32.const 4)
+    (i32.const 1)
+    (i32.add)
+    (i32.add)
+  )
+)

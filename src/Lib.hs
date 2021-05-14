@@ -1,33 +1,50 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NamedFieldPuns #-}
 module Lib where
 
 import Control.Monad.State.Lazy
 import Control.Monad.Except
+import Data.Binary (encode)
 import qualified Data.ByteString.Lazy as B
+import Data.ByteString.Short.Internal (ShortByteString, toShort)
 import qualified Data.Map as M
 import qualified Data.List as L
+import Data.Maybe
 import qualified Language.Wasm as Wasm
 import qualified Language.Wasm.Structure as S
+import qualified Language.Wasm.Structure (Function(..))
 import qualified Language.Wasm.Lexer as X
 
 -- LLVM Stuff
 import LLVM.AST
+import LLVM.AST.IntegerPredicate
+import LLVM.AST.Name
 import LLVM.AST.Global
+import LLVM.AST.Type
 
 import Numeric.Natural
-import qualified Utils
+import Utils
 
 data WasmModST = WasmModST {
   currentFuncIndex :: Natural,
   currentFunction :: [BasicBlock],
   currentBasicBlockInstrs :: [Named Instruction],
-  operandStack :: [Operand]
+  operandStack :: [Operand],
+  currentIdentifierNumber :: Natural,
+  functionTypes :: M.Map Natural S.FuncType
 }
 
-data LLVMInstr = BBOOI BBOOI
-               | FOOI FOOI
+data LLVMInstr = B BinOp | U UnOp
+data BinOp = BBOOI BBOOI | BOOI BOOI | FOOI FOOI | OOI OOI | IOOI IOOI
+data UnOp = BOI BOI
+type BOI =  Bool -> Operand -> InstructionMetadata -> Instruction
+type BOOI =  Bool -> Operand -> Operand -> InstructionMetadata -> Instruction
 type BBOOI = Bool -> Bool -> Operand -> Operand -> InstructionMetadata -> Instruction
 type FOOI = FastMathFlags -> Operand -> Operand -> InstructionMetadata -> Instruction
+type IOOI =  IntegerPredicate -> Operand -> Operand -> InstructionMetadata -> Instruction
+type OOI = Operand -> Operand -> InstructionMetadata -> Instruction
+
+data LLVMObj = Instr LLVMInstr | Op Operand | Term Terminator
 
 iop :: BBOOI -> Operand -> Operand -> Instruction
 iop op a b = op False False a b []
@@ -35,120 +52,129 @@ iop op a b = op False False a b []
 fop :: FOOI -> Operand -> Operand -> Instruction
 fop op a b = op noFastMathFlags a b []
 
-newChunk :: S.Instruction Natural -> Bool
-newChunk S.Unreachable      = False
-newChunk S.Nop              = False
-newChunk S.Block {}         = True
-newChunk S.Loop {}          = False
-newChunk S.If {}            = True
-newChunk S.Br {}            = True
-newChunk S.BrIf {}          = True
-newChunk S.BrTable {}       = True
-newChunk S.Return           = True
-newChunk S.Call {}          = True
-newChunk S.CallIndirect {}  = True
-newChunk S.Drop             = False
-newChunk S.Select           = False
-newChunk S.GetLocal {}      = True
-newChunk S.SetLocal {}      = True
-newChunk S.TeeLocal {}      = True
-newChunk S.GetGlobal {}     = True
-newChunk S.SetGlobal {}     = True
-newChunk S.I32Load {}       = True
-newChunk S.I64Load {}       = True
-newChunk S.F32Load {}       = True
-newChunk S.F64Load {}       = True
-newChunk S.I32Load8S {}     = True
-newChunk S.I32Load8U {}     = True
-newChunk S.I32Load16S {}    = True
-newChunk S.I32Load16U {}    = True
-newChunk S.I64Load8S {}     = True
-newChunk S.I64Load8U {}     = True
-newChunk S.I64Load16S {}    = True
-newChunk S.I64Load16U {}    = True
-newChunk S.I64Load32S {}    = True
-newChunk S.I64Load32U {}    = True
-newChunk S.I32Store {}      = True
-newChunk S.I64Store {}      = True
-newChunk S.F32Store {}      = True
-newChunk S.F64Store {}      = True
-newChunk S.I32Store8 {}     = True
-newChunk S.I32Store16 {}    = True
-newChunk S.I64Store8 {}     = True
-newChunk S.I64Store16 {}    = True
-newChunk S.I64Store32 {}    = True
-newChunk S.CurrentMemory    = False
-newChunk S.GrowMemory       = False
-newChunk S.I32Const {}      = False
-newChunk S.I64Const {}      = False
-newChunk S.F32Const {}      = False
-newChunk S.F64Const {}      = False
-newChunk S.IUnOp {}         = True
-newChunk S.IBinOp {}        = True
-newChunk S.I32Eqz           = True
-newChunk S.I64Eqz           = True
-newChunk S.IRelOp {}        = False
-newChunk S.FUnOp {}         = False
-newChunk S.FBinOp {}        = False
-newChunk S.FRelOp  {}       = False
-newChunk S.I32WrapI64       = False
-newChunk S.ITruncFU {}      = False
-newChunk S.ITruncFS {}      = False
-newChunk S.I64ExtendSI32    = False
-newChunk S.I64ExtendUI32    = False
-newChunk S.FConvertIU {}    = False
-newChunk S.FConvertIS {}    = False
-newChunk S.F32DemoteF64     = False
-newChunk S.F64PromoteF32    = False
-newChunk S.IReinterpretF {} = False
-newChunk S.FReinterpretI {} = False
+isLLVMInstr :: LLVMObj -> Bool
+isLLVMInstr (Instr _) = True
+isLLVMInstr _         = False
 
-wasmInstrToLLVMInstr :: S.Instruction Natural -> Maybe LLVMInstr
-wasmInstrToLLVMInstr (S.IBinOp S.BS32 S.IAdd) = pure $ BBOOI Add
-wasmInstrToLLVMInstr _ = undefined
+isLLVMOp :: LLVMObj -> Bool
+isLLVMOp (Op _) = True
+isLLVMOp _      = False
 
-wasmInstrToLLVMOperand :: S.Instruction Natural -> Maybe Operand
+isLLVMTerm :: LLVMObj -> Bool
+isLLVMTerm (Term _) = True
+isLLVMTerm _        = False
 
--- compiles wasm blocks (delineated by branches and returns--see llvm
--- Terminator) to LLVM BasicBlock
-wasmInstrsToLLVMBlock :: [S.Instruction Natural] -> ExceptT String (State WasmModST) BasicBlock
--- wasmInstrToMIPS :: S.Instruction Natural -> ExceptT String (State WasmModST) [Instruction]
--- WASM instruction for const is just pushing to stack
--- https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-instr-numeric-mathsf-const-c
--- push to stack: sub $sp,$sp,4; sw $t2,($sp);
+unwrapOp :: LLVMObj -> Either String Operand 
+unwrapOp (Op op) = pure op
+unwrapOp _       = fail "not an operand"
 
--- i32.const 3
--- i32.const 2
--- i32.sub
--- i32.const 2
--- i32.const 4
--- i32.mul
--- i32.add
+unwrapTerm :: LLVMObj -> Either String Terminator
+unwrapTerm (Term t) = pure t
+unwrapTerm _        = fail "not a terminator"
 
-wasmInstrsToLLVMBlock instrs = undefined
+wasmInstrToLLVMObj :: S.Instruction Natural -> LLVMObj
+-- wasmInstrToLLVMObj (S.I32Const n)      = Instr $ Op n
+-- Binary Operations(IBinOPs)
+wasmInstrToLLVMObj (S.IBinOp _ S.IAdd)  = Instr $ B $ BBOOI Add
+wasmInstrToLLVMObj (S.IBinOp _ S.ISub)  = Instr $ B $ BBOOI Sub 
+wasmInstrToLLVMObj (S.IBinOp _ S.IMul)  = Instr $ B $ BBOOI Mul
+wasmInstrToLLVMObj (S.IBinOp _ S.IDivS) = Instr $ B $ BOOI SDiv
+wasmInstrToLLVMObj (S.IBinOp _ S.IRemS) = Instr $ B $ OOI SRem
+wasmInstrToLLVMObj (S.IBinOp _ S.IAnd ) = Instr $ B $ OOI And 
+wasmInstrToLLVMObj (S.IBinOp _ S.IOr )  = Instr $ B $ OOI Or
+wasmInstrToLLVMObj (S.IBinOp _ S.IXor ) = Instr $ B $ OOI Xor
+wasmInstrToLLVMObj (S.IBinOp _ S.IShl ) = Instr $ B $ BBOOI Shl
+-- count leading zeros, trailing zeros, popped vals (IUnOPs)//////TO FIX
+--wasmInstrToLLVMObj (S.IUnOp _ S.IClz) = Instr $ -- Clz
+--wasmInstrToLLVMObj (S.IUnOp _ S.ICtz) = Instr $ -- Ctz
+--wasmInstrToLLVMObj (S.IUnOp _ S.IPopcnt) = Instr $ -- Popcnt
+-- Relational Operations(IRelOPs) IEq	 INe	 ILtU	 ILtS	 IGtU	 IGtS	 ILeU	 ILeS	 IGeU	 IGeS
+wasmInstrToLLVMObj (S.IRelOp _ S.IEq)  = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.EQ)
+wasmInstrToLLVMObj (S.IRelOp _ S.INe)  = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.NE)
+wasmInstrToLLVMObj (S.IRelOp _ S.ILtU) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.ULT)
+wasmInstrToLLVMObj (S.IRelOp _ S.ILtS) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.SLT)
+wasmInstrToLLVMObj (S.IRelOp _ S.IGtU) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.UGT)
+wasmInstrToLLVMObj (S.IRelOp _ S.IGtS) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.SGT)
+wasmInstrToLLVMObj (S.IRelOp _ S.ILeU) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.ULE)
+wasmInstrToLLVMObj (S.IRelOp _ S.ILeS) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.SLE)
+wasmInstrToLLVMObj (S.IRelOp _ S.IGeU) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.UGE)
+wasmInstrToLLVMObj (S.IRelOp _ S.IGeS) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerPredicate.SGE)
+-- FUn Operations(FUnOPs) FAbs	 FNeg	 FCeil	 FFloor	 FTrunc	 FNearest	 FSqrt
+--wasmInstrToLLVMObj (S.FUnOp _ S.FAbs) = Instr $ IOOI Abs
+
+buildBasicBlock :: Name -> Named Terminator -> [LLVMObj] -> ExceptT String (State WasmModST) BasicBlock
+buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> pure term
   where
-    chunks = Utils.splitWhen newChunk instrs
-    -- use utils? splitChunks l  = splitWhen newChunks l
-    -- digest chunk =
+    chunks = splitWhen (\x -> isLLVMOp x || isLLVMTerm x) llvmObjs -- llvmObj?
+    llvmInstrs = concat <$> traverse munch chunks
 
--- wasmInstrToMIPS (S.I32Const i) = do
---   env <- get
---   env's stack, push Operand i
+    munch :: [LLVMObj] -> ExceptT String (State WasmModST) [Named Instruction]
+    munch []    = pure []
+    munch chunk = sequence [buildLLVMInstr chunk]
+      where
+        buildBinOp :: BinOp -> Operand -> Operand -> Instruction
+        buildBinOp (BBOOI op) = iop op
+        buildBinOp (FOOI  op) = fop op
 
--- wasmInstrToMIPS (S.IAdd) = do
---   env <-
---   i = pop envStack
---   j = pop envStack
---   -- %k = op %i %i
---   append (k = iop Add i j) to list of compiled instructions
---   push k to envStack
+        newIdentifier :: Type -> ExceptT String (State WasmModST) Name
+        newIdentifier idType = do
+          n     <- currentIdentifierNumber <$> get
+          stack <- operandStack <$> get
+          let name = Name $ toShort $ B.toStrict $ B.append "ident" $ encode $ n + 1
+              identifier = LocalReference idType name
+          modify (\env -> env {
+             currentIdentifierNumber = n + 1,
+             operandStack = identifier : stack
+            })
+          pure name
 
--- wasmInstrToMIPS (S.I32Const i) = pure $ fmap Inst instr
---   where
---     instr = [OP_LI (Tmp 0) i      -- load literal into $t0
---            , OP_LI (Tmp 8) 4
---            , OP_SUB SP SP (Tmp 8) -- allocate stack space
---            , OP_SW (Tmp 0) 0 SP]  -- save content of $t0 to stack
+        -- b
+        -- a
+        -- sub
+        -- sub a b vs sub b a
+        -- doesnt the instr come after the ops in wasm?
+        -- the order of a and b might need to be switched
+        buildLLVMInstr :: [LLVMObj] -> ExceptT String (State WasmModST) (Named Instruction)
+        buildLLVMInstr (Instr (B op):Op a:Op b:rest) = do
+          let newOps = traverse unwrapOp rest
+          ops        <- liftEither newOps
+          modify (\env -> env { operandStack = ops ++ operandStack env})
+          identifier <- newIdentifier VoidType -- FIXME: what type should we put here?
+          pure $ identifier := buildBinOp op a b
+        buildLLVMInstr [Instr (B op), Op a] = do
+          env        <- get
+          (b, rest)  <- maybe (fail "not enough operands") pure $ L.uncons $ operandStack env
+          put $ env { operandStack = rest }
+          identifier <- newIdentifier VoidType -- FIXME: what type should we put here?
+          pure $ identifier := buildBinOp op a b
+        buildLLVMInstr [Instr (B op)] = do
+          env          <- get
+          (a, b, rest) <- case operandStack env of
+            a:b:rest -> pure (a, b, rest)
+            _        -> fail "not enough operands"
+          put $ env { operandStack = rest }
+          identifier   <- newIdentifier VoidType -- FIXME: what type should we put here?
+          pure $ identifier := buildBinOp op a b
+        buildLLVMInstr _ = fail "not implemented"
+
+wasmFuncToLLVMFunc :: S.Function -> ExceptT String (State WasmModST) Global
+wasmFuncToLLVMFunc func = do
+  blks        <- traverse splitTerm $ splitWhen isLLVMTerm llvmObjs   -- questionable criteria here
+  namedBlks   <- liftEither $ sequence $ assignName <$> zip [0..] blks
+  basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
+  indx        <- currentFuncIndex <$> get
+  let name = Name $ toShort $ B.toStrict $ B.append "func" $ encode indx
+  pure $ functionDefaults { basicBlocks, name }
+  where
+    llvmObjs = wasmInstrToLLVMObj <$> Language.Wasm.Structure.body func
+    funcType = S.funcType func
+    name = Name "asdf"
+    maybeToEither = maybe (fail "Why are we dealing with this shit big sad") pure :: Maybe a -> ExceptT String (State WasmModST) a
+    splitTerm = maybeToEither . fmap (fmap L.reverse) . L.uncons . L.reverse
+    assignName :: (Int, (LLVMObj, [LLVMObj])) -> Either String (Name, Named Terminator, [LLVMObj])
+    assignName (n, (t, instrs)) = do
+      term <- unwrapTerm t
+      pure (Name (toShort $ B.toStrict $ B.append "block" $ encode n), Name "asdf" := term, instrs)
 
 int :: Type
 int = IntegerType 32
