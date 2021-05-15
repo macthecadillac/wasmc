@@ -161,7 +161,7 @@ buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> pure ter
           put $ env { operandStack = rest }
           identifier   <- newIdentifier VoidType -- FIXME: what type should we put here?
           pure $ identifier := buildBinOp op a b
-        buildLLVMInstr _ = fail "not implemented"
+        buildLLVMInstr _ = fail "not implemented" -- FIXME: complete me!!
 
 wasmFuncToLLVMFunc :: Natural -> S.Function -> ExceptT String (State WasmModST) Global
 wasmFuncToLLVMFunc indx func = do
@@ -176,7 +176,7 @@ wasmFuncToLLVMFunc indx func = do
   pure $ functionDefaults { basicBlocks, name, returnType, parameters }
   where
     llvmObjs = wasmInstrToLLVMObj <$> Language.Wasm.Structure.body func
-    blks = splitTerm <$> splitWhen isLLVMTerm llvmObjs   -- questionable criteria here
+    blks = splitTerm <$> splitWhen isLLVMTerm llvmObjs   -- FIXME: questionable criteria here
     name = Name $ toShort $ B.toStrict $ B.append "func" $ encode indx
     getFunctionType env = functionTypes env M.! (S.funcType func)
 
@@ -202,52 +202,65 @@ wasmFuncToLLVMFunc indx func = do
       term <- unwrapTerm t
       pure (Name (toShort $ B.toStrict $ B.append "block" $ encode n), Name "asdf" := term, instrs)
 
-wasmModuleToLLVMModule :: S.Module -> ExceptT String (State WasmModST) Module
-wasmModuleToLLVMModule = undefined
-
-int :: Type
-int = IntegerType 32
-
-defAdd :: Definition
-defAdd = GlobalDefinition functionDefaults
-  { name = Name "add"
-  , parameters =
-      ( [ Parameter int (Name "a") []
-        , Parameter int (Name "b") [] ]
-      , False )
-  , returnType = int
-  , basicBlocks = [body]
-  }
-  where
-    body = BasicBlock
-        (Name "entry")
-        [ Name "result" :=
-            Add False  -- no signed wrap
-                False  -- no unsigned wrap
-                (LocalReference int (Name "a"))
-                (LocalReference int (Name "b"))
-                []]
-        (Do $ Ret (Just (LocalReference int (Name "result"))) [])
-
-module_ :: Module
-module_ = defaultModule
-  { moduleName = "basic"
-  , moduleDefinitions = [defAdd]
-  }
-
+-- TODO: tables
+-- TODO: mems
+-- TODO: globals
+-- TODO: elems
+-- TODO: datas
+-- TODO: imports
+-- TODO: exports
+wasmModuleToLLVMModule :: S.Module -> Either String Module
+wasmModuleToLLVMModule wasmMod = do
+  globalDefs <- buildGlobalDefs wasmMod
+  let moduleDefinitions = GlobalDefinition <$> globalDefs
+  pure $ defaultModule
+    { moduleName = "basic",
+      moduleDefinitions
+    }
+  where 
+    startFunction = S.start wasmMod
+    initModST = WasmModST { currentFuncIndex = 0
+                          , currentFunction = []
+                          , currentBasicBlockInstrs = []
+                          , operandStack = []
+                          , currentIdentifierNumber = 0
+                          , functionTypes = M.fromList $ zip [0..] $ S.types wasmMod
+                          }
+    buildGlobalDefs = flip evalState initModST
+                    . runExceptT
+                    . traverse (uncurry wasmFuncToLLVMFunc)
+                    . zip [0..]
+                    . S.functions
 
 parseWasmModule :: B.ByteString -> Either String S.Module
 parseWasmModule = Wasm.parse
 
--- compileModule :: S.Module -> ExceptT String (State WasmModST) Module
--- compileModule mod = do
---   -- TODO: arguments from types?????
---   -- TODO: literally everything else. what even is a table
---   -- Now: set the startId in environment
---   env <- get
---   -- put $ env { startIndex = (\(StartFunction n) -> n) <$> start mod}
---   -- what needs to go in data? kdata? text?
---   -- compile each function
---   -- instrs <- traverse (uncurry compileFunction) $ zip [0..] $ functions mod
---   -- let sections = [MIPSSection "data" [], MIPSSection "kdata" [], MIPSSection "text" []]
---   -- pure $ MIPSFile "yeehaw" sections $ filter (not . null) instrs
+-- int :: Type
+-- int = IntegerType 32
+
+-- defAdd :: Definition
+-- defAdd = GlobalDefinition functionDefaults
+--   { name = Name "add"
+--   , parameters =
+--       ( [ Parameter int (Name "a") []
+--         , Parameter int (Name "b") [] ]
+--       , False )
+--   , returnType = int
+--   , basicBlocks = [body]
+--   }
+--   where
+--     body = BasicBlock
+--         (Name "entry")
+--         [ Name "result" :=
+--             Add False  -- no signed wrap
+--                 False  -- no unsigned wrap
+--                 (LocalReference int (Name "a"))
+--                 (LocalReference int (Name "b"))
+--                 []]
+--         (Do $ Ret (Just (LocalReference int (Name "result"))) [])
+
+-- module_ :: Module
+-- module_ = defaultModule
+--   { moduleName = "basic"
+--   , moduleDefinitions = [defAdd]
+--   }
