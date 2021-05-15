@@ -20,4 +20,4 @@ main = do
   either print (IO.writeFile "output.txt" . ppllvm) $ compile src
   where
     compile :: B.ByteString -> Either String Module
-    compile src = wasmModuleToLLVMModule =<< parseWasmModule src
+    compile src = compileModule =<< parseModule src
