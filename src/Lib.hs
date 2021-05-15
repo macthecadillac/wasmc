@@ -102,6 +102,12 @@ wasmInstrToLLVMObj (S.IRelOp _ S.IGeS) = Instr $ B $ OOI (ICmp LLVM.AST.IntegerP
 -- FUn Operations(FUnOPs) FAbs	 FNeg	 FCeil	 FFloor	 FTrunc	 FNearest	 FSqrt
 --wasmInstrToLLVMObj (S.FUnOp _ S.FAbs) = Instr $ IOOI Abs
 
+wasmTypeToLLVMType :: S.ValueType -> Type
+wasmTypeToLLVMType S.I32 = IntegerType 32
+wasmTypeToLLVMType S.I64 = IntegerType 64
+wasmTypeToLLVMType S.F32 = FloatingPointType FloatFP
+wasmTypeToLLVMType S.F64 = FloatingPointType DoubleFP
+    
 buildBasicBlock :: Name -> Named Terminator -> [LLVMObj] -> ExceptT String (State WasmModST) BasicBlock
 buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> pure term
   where
@@ -157,24 +163,47 @@ buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> pure ter
           pure $ identifier := buildBinOp op a b
         buildLLVMInstr _ = fail "not implemented"
 
-wasmFuncToLLVMFunc :: S.Function -> ExceptT String (State WasmModST) Global
-wasmFuncToLLVMFunc func = do
-  blks        <- traverse splitTerm $ splitWhen isLLVMTerm llvmObjs   -- questionable criteria here
+wasmFuncToLLVMFunc :: Natural -> S.Function -> ExceptT String (State WasmModST) Global
+wasmFuncToLLVMFunc indx func = do
+  modify (\env -> env { currentFuncIndex = indx })
+  funcType    <- getFunctionType <$> get
+  let returnType = convertRetType $ S.results funcType
+      paramList  = buildParamList $ S.params funcType
+      parameters = (paramList, False)
+  modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
   namedBlks   <- liftEither $ sequence $ assignName <$> zip [0..] blks
   basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
-  indx        <- currentFuncIndex <$> get
-  let name = Name $ toShort $ B.toStrict $ B.append "func" $ encode indx
-  pure $ functionDefaults { basicBlocks, name }
+  pure $ functionDefaults { basicBlocks, name, returnType, parameters }
   where
     llvmObjs = wasmInstrToLLVMObj <$> Language.Wasm.Structure.body func
-    funcType = S.funcType func
-    name = Name "asdf"
-    maybeToEither = maybe (fail "Why are we dealing with this shit big sad") pure :: Maybe a -> ExceptT String (State WasmModST) a
-    splitTerm = maybeToEither . fmap (fmap L.reverse) . L.uncons . L.reverse
+    blks = splitTerm <$> splitWhen isLLVMTerm llvmObjs   -- questionable criteria here
+    name = Name $ toShort $ B.toStrict $ B.append "func" $ encode indx
+    getFunctionType env = functionTypes env M.! (S.funcType func)
+
+    convertRetType []  = VoidType
+    convertRetType [t] = wasmTypeToLLVMType t
+    convertRetType l   = StructureType True $ wasmTypeToLLVMType <$> l
+
+    buildParamList l = do
+      (ident, paramType) <- zip paramIdentifiers $ wasmTypeToLLVMType <$> l
+      pure $ Parameter paramType ident []
+      where
+        indx = [0..] :: [Natural]
+        paramIdentifiers = (Name . toShort . B.toStrict . B.append "ident" . encode) <$> indx
+
+    splitTerm :: [LLVMObj] -> (LLVMObj, [LLVMObj])
+    splitTerm = maybe (error "empty block") id  -- error because this will be a bug
+              . fmap (fmap L.reverse)
+              . L.uncons
+              . L.reverse
+
     assignName :: (Int, (LLVMObj, [LLVMObj])) -> Either String (Name, Named Terminator, [LLVMObj])
     assignName (n, (t, instrs)) = do
       term <- unwrapTerm t
       pure (Name (toShort $ B.toStrict $ B.append "block" $ encode n), Name "asdf" := term, instrs)
+
+wasmModuleToLLVMModule :: S.Module -> ExceptT String (State WasmModST) Module
+wasmModuleToLLVMModule = undefined
 
 int :: Type
 int = IntegerType 32
@@ -207,8 +236,8 @@ module_ = defaultModule
   }
 
 
-parseModule :: B.ByteString -> Either String S.Module
-parseModule = Wasm.parse
+parseWasmModule :: B.ByteString -> Either String S.Module
+parseWasmModule = Wasm.parse
 
 -- compileModule :: S.Module -> ExceptT String (State WasmModST) Module
 -- compileModule mod = do
