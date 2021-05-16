@@ -2,13 +2,14 @@ module Utils where
 
 import Data.Binary (encode)
 import Data.ByteString.Lazy (append, toStrict, ByteString)
+import Data.ByteString.Lazy.Char8 (pack)
 import Data.ByteString.Short.Internal (ShortByteString, toShort)
 import Data.Tuple (swap)
 import LLVM.AST.Name
 import Numeric.Natural
 
 splitWhen :: (a -> Bool) -> [a] -> [[a]]
-splitWhen f ls = go ls []
+splitWhen f ls = filter (not . null) $ go ls []
   where
     go []    acc     = reverse acc
     go l     []      = uncurry go $ fmap pure $ swap $ break f l
@@ -17,4 +18,4 @@ splitWhen f ls = go ls []
         (l1, l2) = break f l
 
 newName :: ByteString -> Natural -> Name
-newName s n = Name $ toShort $ toStrict $ append s $ encode n
+newName s n = Name $ toShort $ toStrict $ append s $ pack $ show n
