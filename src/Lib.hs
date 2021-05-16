@@ -26,7 +26,7 @@ import Numeric.Natural
 import Utils
 
 data WasmModST = WasmModST {
-  currentFuncIndex :: Natural,
+  startFunctionIndex :: Maybe Natural,
   currentFunction :: [BasicBlock],
   currentBasicBlockInstrs :: [Named Instruction],
   operandStack :: [Operand],
@@ -64,13 +64,13 @@ isLLVMTerm :: LLVMObj -> Bool
 isLLVMTerm (Term _) = True
 isLLVMTerm _        = False
 
-unwrapOp :: LLVMObj -> Either String Operand 
-unwrapOp (Op op) = pure op
-unwrapOp _       = fail "not an operand"
+unwrapOp :: LLVMObj -> Operand 
+unwrapOp (Op op) = op
+unwrapOp _       = error "not an operand"
 
-unwrapTerm :: LLVMObj -> Either String Terminator
-unwrapTerm (Term t) = pure t
-unwrapTerm _        = fail "not a terminator"
+unwrapTerm :: LLVMObj -> Terminator
+unwrapTerm (Term t) = t
+unwrapTerm _        = error "not a terminator"
 
 compileInstr :: S.Instruction Natural -> LLVMObj
 -- compileInstr (S.I32Const n)      = Instr $ Op n
@@ -142,9 +142,8 @@ buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> pure ter
         -- the order of a and b might need to be switched
         buildLLVMInstr :: [LLVMObj] -> ExceptT String (State WasmModST) (Named Instruction)
         buildLLVMInstr (Instr (B op):Op a:Op b:rest) = do
-          let newOps = traverse unwrapOp rest
-          ops        <- liftEither newOps
-          modify (\env -> env { operandStack = ops ++ operandStack env})
+          let newOps = unwrapOp <$> rest
+          modify (\env -> env { operandStack = newOps ++ operandStack env})
           identifier <- newIdentifier VoidType -- FIXME: what type should we put here?
           pure $ identifier := buildBinOp op a b
         buildLLVMInstr [Instr (B op), Op a] = do
@@ -161,46 +160,45 @@ buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> pure ter
           put $ env { operandStack = rest }
           identifier   <- newIdentifier VoidType -- FIXME: what type should we put here?
           pure $ identifier := buildBinOp op a b
-        buildLLVMInstr _ = fail "not implemented" -- FIXME: complete me!!
+        buildLLVMInstr _ = error "not implemented" -- FIXME: complete me!!
 
 compileFunction :: Natural -> S.Function -> ExceptT String (State WasmModST) Global
 compileFunction indx func = do
-  modify (\env -> env { currentFuncIndex = indx })
-  funcType    <- getFunctionType <$> get
-  let returnType = convertRetType $ S.results funcType
+  startIndex <- startFunctionIndex <$> get
+  funcType   <- getFunctionType <$> get
+  let returnType = compileRetType $ S.results funcType
       paramList  = buildParamList $ S.params funcType
       parameters = (paramList, False)
+      namedBlks  = assignName <$> zip [0..] blks
+      -- if indx == startIndex then "main" else "func{indx}". All the extra code
+      -- handle the fact that startIndex may or may not have a value
+      name = maybe (newName "func" indx) id $ const "main" <$> (guard . (==indx) =<< startIndex)
   modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
-  namedBlks   <- liftEither $ sequence $ assignName <$> zip [0..] blks
   basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
   pure $ functionDefaults { basicBlocks, name, returnType, parameters }
   where
     llvmObjs = compileInstr <$> Language.Wasm.Structure.body func
     blks = splitTerm <$> splitWhen isLLVMTerm llvmObjs   -- FIXME: questionable criteria here
-    name = Name $ toShort $ B.toStrict $ B.append "func" $ encode indx
     getFunctionType env = functionTypes env M.! (S.funcType func)
 
-    convertRetType []  = VoidType
-    convertRetType [t] = compileType t
-    convertRetType l   = StructureType True $ compileType <$> l
+    assignName (n, (t, instrs)) = (newName "block" n, Name "asdf" := unwrapTerm t, instrs)
+
+    compileRetType []  = VoidType
+    compileRetType [t] = compileType t
+    compileRetType l   = StructureType True $ compileType <$> l
 
     buildParamList l = do
       (ident, paramType) <- zip paramIdentifiers $ compileType <$> l
       pure $ Parameter paramType ident []
       where
         indx = [0..] :: [Natural]
-        paramIdentifiers = (Name . toShort . B.toStrict . B.append "ident" . encode) <$> indx
+        paramIdentifiers = newName "ident" <$> indx
 
     splitTerm :: [LLVMObj] -> (LLVMObj, [LLVMObj])
     splitTerm = maybe (error "empty block") id  -- error because this will be a bug
               . fmap (fmap L.reverse)
               . L.uncons
               . L.reverse
-
-    assignName :: (Int, (LLVMObj, [LLVMObj])) -> Either String (Name, Named Terminator, [LLVMObj])
-    assignName (n, (t, instrs)) = do
-      term <- unwrapTerm t
-      pure (Name (toShort $ B.toStrict $ B.append "block" $ encode n), Name "asdf" := term, instrs)
 
 -- TODO: tables
 -- TODO: mems
@@ -218,8 +216,8 @@ compileModule wasmMod = do
       moduleDefinitions
     }
   where 
-    startFunction = S.start wasmMod
-    initModST = WasmModST { currentFuncIndex = 0
+    startFunctionIndex = (\(S.StartFunction n) -> n) <$> S.start wasmMod
+    initModST = WasmModST { startFunctionIndex
                           , currentFunction = []
                           , currentBasicBlockInstrs = []
                           , operandStack = []
