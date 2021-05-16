@@ -268,11 +268,8 @@ compileFunction indx func = do
     compileRetType l   = StructureType True $ compileType <$> l
 
     buildParamList l = do
-      (ident, paramType) <- zip paramIdentifiers $ compileType <$> l
-      pure $ Parameter paramType ident []
-      where
-        indx = [0..] :: [Natural]
-        paramIdentifiers = newName "ident" <$> indx
+      (i, t) <- zip [0..] l
+      pure $ Parameter (compileType t) (newName "ident" i) []
 
     splitTerm :: [LLVMObj] -> (LLVMTerm, [LLVMObj])
     splitTerm []            = error "empty block"  -- this would be a bug
