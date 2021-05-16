@@ -167,14 +167,15 @@ compileType S.F32 = FloatingPointType FloatFP
 compileType S.F64 = FloatingPointType DoubleFP
     
 buildBasicBlock :: Name -> LLVMTerm -> [LLVMObj] -> ExceptT String (State WasmModST) BasicBlock
-buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> makeTerm term
+buildBasicBlock name term llvmObjs = BasicBlock name <$> llvmInstrs <*> makeTerminator term
   where
     chunks = splitWhen (\x -> isLLVMInstr x || isLLVMTerm x) llvmObjs
     llvmInstrs = L.concat <$> traverse munch chunks
 
-    makeTerm :: LLVMTerm -> ExceptT String (State WasmModST) (Named Terminator)
-    makeTerm Lib.Ret = do
+    makeTerminator :: LLVMTerm -> ExceptT String (State WasmModST) (Named Terminator)
+    makeTerminator Lib.Ret = do
       retVal <- stackToRetVal . operandStack <$> get
+      modify (\env -> env { operandStack = [] })
       pure $ Do $ LLVM.AST.Ret (Just retVal) []
 
     stackToRetVal []  = LocalReference VoidType "void"
