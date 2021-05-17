@@ -25,7 +25,7 @@ import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
 
 import Numeric.Natural
-import Utils (makeName, splitWhen)
+import Utils (makeName, splitAfter)
 
 -- a record for a "global" state per WASM module
 data WasmModST = WasmModST { operandStack :: [AST.Operand]
@@ -191,7 +191,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     -- we define a chunk as a block of code that ends with an LLVM instruction.
     -- This excludes consts, set and get in the WASM world. Here we divide
     -- `llvmObjs` into a list of chunks.
-    chunks = splitWhen isLLVMInstr llvmObjs
+    chunks = splitAfter isLLVMInstr llvmObjs
     -- we consume the chunks by munching them one at a time, collecting the
     -- result with `traverse` which 'magically' handles the `Codegen` monad, and
     -- concatenating the results into a list of LLVM instructions.
@@ -322,7 +322,7 @@ compileFunction indx func = do
       -- split the list of `LLVMObj` into blocks by looking for terminators. The
       -- terminators and the code in the corresponding blocks are then
       -- separated into an 'association list.'
-      blks       = splitTerm <$> splitWhen isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
+      blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
       namedBlks  = assignName <$> zip [0..] blks
       -- if indx == startIndex then "main" else "func{indx}". All the extra code
       -- handle the fact that startIndex may or may not have a value

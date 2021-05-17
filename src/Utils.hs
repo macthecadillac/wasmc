@@ -8,8 +8,8 @@ import Data.Tuple (swap)
 import LLVM.AST.Name
 import Numeric.Natural
 
-splitWhen :: (a -> Bool) -> [a] -> [[a]]
-splitWhen f ls = filter (not . null) $ go ls []
+splitAfter :: (a -> Bool) -> [a] -> [[a]]
+splitAfter f ls = filter (not . null) $ go ls []
   where
     go []    acc     = reverse acc
     go l     []      = uncurry go $ fmap pure $ swap $ break f l
@@ -18,4 +18,4 @@ splitWhen f ls = filter (not . null) $ go ls []
         (l1, l2) = break f l
 
 makeName :: ByteString -> Natural -> Name
-makeName s n = Name $ toShort $ toStrict $ append s $ pack $ show n
+makeName s = Name . toShort . toStrict . append s . pack . show
