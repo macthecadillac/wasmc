@@ -4,6 +4,7 @@ module Lib where
 
 import Control.Monad.State.Lazy
 import Control.Monad.Except
+import Data.Bifunctor
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Map as M
 import qualified Data.List as L
@@ -16,6 +17,7 @@ import qualified Language.Wasm.Structure (Function(..))
 
 -- LLVM Stuff
 import qualified LLVM.AST as AST
+import qualified LLVM.AST.CallingConvention as Conv
 import qualified LLVM.AST.Constant as Constant
 import qualified LLVM.AST.Float as Float
 import qualified LLVM.AST.IntegerPredicate as Pred
@@ -24,13 +26,16 @@ import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
 
 import Numeric.Natural
-import Utils (newName, splitWhen)
+import Utils (makeName, splitWhen)
 
 data WasmModST = WasmModST { startFunctionIndex :: Maybe Natural
                            , operandStack :: [AST.Operand]
                            , currentIdentifierNumber :: Natural
                            , functionTypes :: M.Map Natural S.FuncType }
                            deriving (Show)
+
+-- just to save some typing and make the type signatures a bit cleaner
+type Codegen = ExceptT String (State WasmModST)
 
 data LLVMInstr = B BinOp
                | U UnOp
@@ -168,13 +173,13 @@ compileType S.I64 = Type.IntegerType 64
 compileType S.F32 = Type.FloatingPointType Type.FloatFP
 compileType S.F64 = Type.FloatingPointType Type.DoubleFP
     
-buildBasicBlock :: Name.Name -> LLVMTerm -> [LLVMObj] -> ExceptT String (State WasmModST) Global.BasicBlock
+buildBasicBlock :: Name.Name -> LLVMTerm -> [LLVMObj] -> Codegen Global.BasicBlock
 buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> makeTerminator term
   where
     chunks = splitWhen (\x -> isLLVMInstr x || isLLVMTerm x) llvmObjs
     llvmInstrs = L.concat <$> traverse munch chunks
 
-    makeTerminator :: LLVMTerm -> ExceptT String (State WasmModST) (AST.Named AST.Terminator)
+    makeTerminator :: LLVMTerm -> Codegen (AST.Named AST.Terminator)
     makeTerminator Lib.Ret = do
       retVal <- stackToRetVal . operandStack <$> get
       modify (\env -> env { operandStack = [] })
@@ -190,31 +195,46 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     -- sub a b vs sub b a
     -- doesnt the instr come after the ops in wasm?
     -- the order of a and b might need to be switched
-    munch :: [LLVMObj] -> ExceptT String (State WasmModST) [AST.Named AST.Instruction]
+    munch :: [LLVMObj] -> Codegen [AST.Named AST.Instruction]
     munch = munchBackwards . L.reverse
       where
         munchBackwards [] = pure []
-        munchBackwards (Instr (B op):Op a:Op b:rest) = do
+        munchBackwards (Instr (B op):rest) = do
           putOperandsOnStack rest
+          opStack <- operandStack <$> get
+          (a, b) <- case opStack of
+                      a:b:rest -> pure (a, b)
+                      _        -> fail "not enough operands"
           identifier <- identify $ B op
           pure [identifier AST.:= buildBinOp op a b]
-        munchBackwards [Instr (B op), Op a] = do
-          env        <- get
-          (b, rest)  <- maybe (fail "not enough operands") pure $ L.uncons $ operandStack env
-          put $ env { operandStack = rest }
-          identifier <- identify $ B op
-          pure [identifier AST.:= buildBinOp op a b]
-        munchBackwards [Instr (B op)] = do
-          env          <- get
-          (a, b, rest) <- case operandStack env of
-            a:b:rest -> pure (a, b, rest)
-            _        -> fail "not enough operands"
-          put $ env { operandStack = rest }
-          identifier   <- identify $ B op
-          pure [identifier AST.:= buildBinOp op a b]
+        munchBackwards (Instr (Call i):rest) = do
+          WasmModST { operandStack, functionTypes } <- get
+          let funcType       = functionTypes M.! i
+              arguments      = S.params funcType
+              nArgs          = fromIntegral $ L.length $ arguments
+              argumentTypes  = compileType <$> arguments
+              resultType     = compileRetTypeList $ S.results funcType
+              name           = makeName "func" i
+              function       = Right
+                             $ AST.ConstantOperand
+                             $ flip Constant.GlobalReference name 
+                             $ Type.FunctionType resultType argumentTypes False
+          args       <- fetchOperands nArgs
+          let arguments = [(operand, []) | operand <- args]
+              instr     = AST.Call Nothing Conv.C [] function arguments [] []
+          identifier <- newIdentifier resultType
+          pure [identifier AST.:= instr]
         munchBackwards l
           | all isLLVMOp l = putOperandsOnStack l *> pure []
           | otherwise      = error $ "AST.Instruction sequence not implemented: " ++ show l -- FIXME: complete me!!
+
+    fetchOperands :: Natural -> Codegen [AST.Operand]
+    fetchOperands i = withExceptT (const "not enough operands") $ do
+      env@WasmModST { operandStack } <- get
+      let operands = L.take (fromIntegral i) operandStack
+      guard $ L.length operands == fromIntegral i :: Codegen ()
+      put $ env { operandStack = L.drop (fromIntegral i) operandStack }
+      pure operands
 
     buildBinOp :: BinOp -> AST.Operand -> AST.Operand -> AST.Instruction
     buildBinOp (BBOOI _ op) = iop op
@@ -226,10 +246,10 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     identify (B (OOI   bs _)) = newIdentifier $ Type.IntegerType bs
     identify _                = error "not implmented"
 
-    newIdentifier :: Type.Type -> ExceptT String (State WasmModST) Name.Name
+    newIdentifier :: Type.Type -> Codegen Name.Name
     newIdentifier idType = do
       WasmModST { currentIdentifierNumber, operandStack } <- get
-      let name       = newName "ident" $ currentIdentifierNumber + 1
+      let name       = makeName "ident" $ currentIdentifierNumber + 1
           identifier = AST.LocalReference idType name
       modify (\env -> env {
          currentIdentifierNumber = currentIdentifierNumber + 1,
@@ -237,25 +257,32 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
         })
       pure name
 
-    putOperandsOnStack :: [LLVMObj] -> ExceptT String (State WasmModST) ()
+    putOperandsOnStack :: [LLVMObj] -> Codegen ()
     putOperandsOnStack l | not $ all isLLVMOp l = error "Not all operands."
                          | otherwise            = modify f
                        where
                          f env = env { operandStack = newOps ++ operandStack env }
                          newOps = unwrapOp <$> l
 
-compileFunction :: Natural -> S.Function -> ExceptT String (State WasmModST) Global.Global
+compileRetTypeList :: [S.ValueType] -> Type.Type
+compileRetTypeList []  = Type.VoidType
+compileRetTypeList [t] = compileType t
+compileRetTypeList l   = Type.StructureType True $ compileType <$> l
+
+compileFunction :: Natural -> S.Function -> Codegen Global.Global
 compileFunction indx func = do
+  -- reset currentIdentifierNumber for each function
+  modify (\env -> env { currentIdentifierNumber = 0})
   WasmModST { startFunctionIndex, operandStack, functionTypes } <- get
   let funcType   = functionTypes M.! (S.funcType func)
-      returnType = compileRetType $ S.results funcType
-      paramList  = buildParamList $ S.params funcType
-      parameters = (paramList, False)
+      returnType = compileRetTypeList $ S.results funcType
+  paramList <- buildParamList $ S.params funcType
+  let parameters = (paramList, False)
       blks       = splitTerm <$> splitWhen isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
       namedBlks  = assignName <$> zip [0..] blks
       -- if indx == startIndex then "main" else "func{indx}". All the extra code
       -- handle the fact that startIndex may or may not have a value
-      name = maybe (newName "func" indx) id
+      name = maybe (makeName "func" indx) id
         $ const "main" <$> (guard . (==indx) =<< startFunctionIndex)
   modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
   basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
@@ -266,15 +293,16 @@ compileFunction indx func = do
   where
     llvmObjs = compileInstr <$> Language.Wasm.Structure.body func
 
-    assignName (n, (t, instrs)) = (newName "block" n, t, instrs)
+    assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
 
-    compileRetType []  = Type.VoidType
-    compileRetType [t] = compileType t
-    compileRetType l   = Type.StructureType True $ compileType <$> l
-
-    buildParamList l = do
-      (i, t) <- zip [0..] l
-      pure $ Global.Parameter (compileType t) (newName "ident" i) []
+    buildParamList :: [S.ValueType] -> Codegen [Global.Parameter]
+    buildParamList l = do  -- Codegen monad
+      let nargs = fromIntegral $ L.length l
+      env@WasmModST { currentIdentifierNumber } <- get
+      put $ env { currentIdentifierNumber = currentIdentifierNumber + nargs }
+      pure $ do  -- List monad
+        (i, t) <- zip [0..] l
+        pure $ Global.Parameter (compileType t) (makeName "ident" i) []
 
     splitTerm :: [LLVMObj] -> (LLVMTerm, [LLVMObj])
     splitTerm []            = error "empty block"  -- this would be a bug
