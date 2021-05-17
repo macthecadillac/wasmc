@@ -210,7 +210,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
 
     stackToRetVal []  = AST.LocalReference Type.VoidType "void"
     stackToRetVal [x] = x
-    stackToRetVal l   = error $ "add support for multiple return vals" ++ (trace (show l) "") -- TODO: support multiple return values
+    stackToRetVal l   = error "add support for multiple return vals"  -- TODO: support multiple return values
 
     -- This takes a 'chunk' of the block and turns it into a single LLVM
     -- instruction.
@@ -227,7 +227,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           -- merge the explicitly provided operands in the current chunk with
           -- the `operandStack` then peel off just the right amount of operands
           -- for the current instruction
-          putOperandsOnStack rest
+          pushOperands rest
           a          <- popOperand
           b          <- popOperand
           -- generate a new identifier for the intermediate result. In LLVM IR
@@ -235,7 +235,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           identifier <- identify $ B op
           pure [identifier AST.:= buildBinOp op a b]
         munchBackwards (Instr (Call i):rest) = do
-          putOperandsOnStack rest
+          pushOperands rest
           WasmModEnv { functionTypes } <- ask
           let funcType       = functionTypes M.! i
               arguments      = S.params funcType
@@ -260,7 +260,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
             -- last chunk in the basic block and will be returned. Put them on
             -- the `operandStack` and the `buildBasicBlock` function will deal
             -- with the rest.
-          | all isLLVMOp l = putOperandsOnStack l *> pure []
+          | all isLLVMOp l = pushOperands l *> pure []
           | otherwise      = error $ "AST.Instruction sequence not implemented: " ++ show l -- FIXME: complete me!!
 
     -- pop operand off the `operandStack`
@@ -270,6 +270,14 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
       (operand, rest) <- maybe (fail "not enough operands") pure $ L.uncons stack
       modify (\env -> env { operandStack = rest })
       pure operand
+
+    pushOperand :: LLVMObj -> Codegen ()
+    pushOperand a
+      | isLLVMOp a = modify (\env -> env { operandStack = unwrapOp a : operandStack env })
+      | otherwise  = error $ "Not an operand: " ++ show a
+
+    pushOperands :: [LLVMObj] -> Codegen ()
+    pushOperands = sequence_ . fmap pushOperand
 
     buildBinOp :: BinOp -> AST.Operand -> AST.Operand -> AST.Instruction
     buildBinOp (BBOOI _ op) = iop op
@@ -294,13 +302,6 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
          operandStack = identifier : operandStack
         })
       pure name
-
-    putOperandsOnStack :: [LLVMObj] -> Codegen ()
-    putOperandsOnStack l | not $ all isLLVMOp l = error "Not all operands."
-                         | otherwise            = modify f
-                       where
-                         f env = env { operandStack = newOps ++ operandStack env }
-                         newOps = unwrapOp <$> l
 
 compileRetTypeList :: [S.ValueType] -> Type.Type
 compileRetTypeList []  = Type.VoidType
@@ -379,37 +380,8 @@ compileModule wasmMod = do
     buildGlobalDefs wasmMod = fst $ evalRWS rws initEnv initWasmST
       where
         rws = runExceptT $ traverse (uncurry compileFunction)
-                         $ zip [0..] $ S.functions wasmMod
+                         $ zip [0..]
+                         $ S.functions wasmMod
 
 parseModule :: B.ByteString -> Either String S.Module
 parseModule = Wasm.parse
-
--- int :: Type
--- int = IntegerType 32
-
--- defAdd :: Definition
--- defAdd = GlobalDefinition functionDefaults
---   { name = Name "add"
---   , parameters =
---       ( [ Parameter int (Name "a") []
---         , Parameter int (Name "b") [] ]
---       , False )
---   , returnType = int
---   , basicBlocks = [body]
---   }
---   where
---     body = BasicBlock
---         (Name "entry")
---         [ Name "result" :=
---             Add False  -- no signed wrap
---                 False  -- no unsigned wrap
---                 (LocalReference int (Name "a"))
---                 (LocalReference int (Name "b"))
---                 []]
---         (Do $ Ret (Just (LocalReference int (Name "result"))) [])
-
--- module_ :: Module
--- module_ = defaultModule
---   { moduleName = "basic"
---   , moduleDefinitions = [defAdd]
---   }
