@@ -28,13 +28,14 @@ import qualified LLVM.AST.Type as Type
 import Numeric.Natural
 import Utils (makeName, splitWhen)
 
+-- a record for a "global" state per WASM module
 data WasmModST = WasmModST { startFunctionIndex :: Maybe Natural
                            , operandStack :: [AST.Operand]
                            , currentIdentifierNumber :: Natural
                            , functionTypes :: M.Map Natural S.FuncType }
                            deriving (Show)
 
--- just to save some typing and make the type signatures a bit cleaner
+-- an alias just to save some typing and make the type signatures a bit cleaner
 type Codegen = ExceptT String (State WasmModST)
 
 data LLVMInstr = B BinOp
@@ -64,7 +65,7 @@ instance Show UnOp where
 data LLVMTerm = Ret
 
 instance Show LLVMTerm where
-  show Lib.Ret = "Ret"
+  show Ret = "Ret"
 
 type BOI =  Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
 type BOOI =  Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
@@ -164,7 +165,7 @@ compileInstr (S.IRelOp S.BS64 S.IGeS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SGE
 compileInstr (S.Call i)               = Instr $ Call $ fromIntegral i
 
 -- Terminators (return, br etc)
-compileInstr S.Return = Term Lib.Ret
+compileInstr S.Return = Term Ret
 compileInstr instr = error $ "Not implemented in compileInstr: " ++ show instr
 
 compileType :: S.ValueType -> Type.Type
@@ -172,15 +173,32 @@ compileType S.I32 = Type.IntegerType 32
 compileType S.I64 = Type.IntegerType 64
 compileType S.F32 = Type.FloatingPointType Type.FloatFP
 compileType S.F64 = Type.FloatingPointType Type.DoubleFP
-    
+
+-- this builds a basic block. A basic block is a single-entry-single-exit block
+-- of code. Here it means it is a block of code that has an identifier and a
+-- terminator (see the llvm-hs-pure docs for specifics) as its last instruction.
+-- `llvmObjs` here is a list of `LLVMObj` that fits within one basic block--that
+-- is to say it must not contain terminators. The single terminator is
+-- separately passed in to the function.
 buildBasicBlock :: Name.Name -> LLVMTerm -> [LLVMObj] -> Codegen Global.BasicBlock
 buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> makeTerminator term
   where
-    chunks = splitWhen (\x -> isLLVMInstr x || isLLVMTerm x) llvmObjs
+    -- we define a chunk as a block of code that ends with an LLVM instruction.
+    -- This excludes consts, set and get in the WASM world. Here we divide
+    -- `llvmObjs` into a list of chunks.
+    chunks = splitWhen isLLVMInstr llvmObjs
+    -- we consume the chunks by munching them one at a time, collecting the
+    -- result with `traverse` which 'magically' handles the `Codegen` monad, and
+    -- concatenating the results into a list of LLVM instructions.
     llvmInstrs = L.concat <$> traverse munch chunks
 
+    -- For `return`s, WASM always returns whatever is left on the stack at the
+    -- time of its invocation, whereas LLVM is very explicit about what to
+    -- return when `ret` is called, so we need to gather what is on the
+    -- `operandStack` and feed them to `AST.Ret`.
+    -- TODO: we will need to expand this when we implement more terminators
     makeTerminator :: LLVMTerm -> Codegen (AST.Named AST.Terminator)
-    makeTerminator Lib.Ret = do
+    makeTerminator Ret = do
       retVal <- stackToRetVal . operandStack <$> get
       modify (\env -> env { operandStack = [] })
       pure $ AST.Do $ AST.Ret (Just retVal) []
@@ -189,26 +207,33 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     stackToRetVal [x] = x
     stackToRetVal l   = error "add support for multiple return vals" -- TODO: support multiple return values
 
-    -- b
-    -- a
-    -- sub
-    -- sub a b vs sub b a
-    -- doesnt the instr come after the ops in wasm?
-    -- the order of a and b might need to be switched
+    -- This takes a 'chunk' of the block and turns it into a single LLVM
+    -- instruction.
+    -- TODO: check the order at which WASM pops items off the stack and feeds
+    -- them to the instructions--just check whether the behavior of `sub` in
+    -- WASM matches that of the generated code.
     munch :: [LLVMObj] -> Codegen [AST.Named AST.Instruction]
+    -- the necessity of munching backwards has to do with how a linked-list
+    -- is a representation of a stack
     munch = munchBackwards . L.reverse
       where
         munchBackwards [] = pure []
         munchBackwards (Instr (B op):rest) = do
+          -- merge the explicitly provided operands in the current chunk with
+          -- the `operandStack` then peel off just the right amount of operands
+          -- for the current instruction
           putOperandsOnStack rest
           opStack <- operandStack <$> get
           (a, b) <- case opStack of
                       a:b:rest -> pure (a, b)
                       _        -> fail "not enough operands"
+          -- generate a new identifier for the intermediate result. In LLVM IR
+          -- this amounts to saving the results to a 'variable.'
           identifier <- identify $ B op
           pure [identifier AST.:= buildBinOp op a b]
         munchBackwards (Instr (Call i):rest) = do
-          WasmModST { operandStack, functionTypes } <- get
+          putOperandsOnStack rest
+          WasmModST { functionTypes } <- get
           let funcType       = functionTypes M.! i
               arguments      = S.params funcType
               nArgs          = fromIntegral $ L.length $ arguments
@@ -225,14 +250,24 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           identifier <- newIdentifier resultType
           pure [identifier AST.:= instr]
         munchBackwards l
+            -- any chunk that does not end with an instruction is likely the
+            -- last chunk in the basic block and will be returned. Put them on
+            -- the `operandStack` and the `buildBasicBlock` function will deal
+            -- with the rest.
           | all isLLVMOp l = putOperandsOnStack l *> pure []
           | otherwise      = error $ "AST.Instruction sequence not implemented: " ++ show l -- FIXME: complete me!!
 
+    -- a 'get operand' function generic over the number of operands it is
+    -- getting.
     fetchOperands :: Natural -> Codegen [AST.Operand]
     fetchOperands i = withExceptT (const "not enough operands") $ do
       env@WasmModST { operandStack } <- get
+      -- attempt to take what is being requested
       let operands = L.take (fromIntegral i) operandStack
+      -- if there are less operands on the `operandStack` than what is
+      -- specified, return an error.
       guard $ L.length operands == fromIntegral i :: Codegen ()
+      -- remove the number of operands taken from the `operandStack`
       put $ env { operandStack = L.drop (fromIntegral i) operandStack }
       pure operands
 
@@ -241,11 +276,14 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     buildBinOp (FOOI  _ op) = fop op
     buildBinOp o          = error $ "Not implemented for binop type: " ++ show o
 
+    identify :: LLVMInstr -> Codegen Name.Name
     identify (B (BBOOI bs _)) = newIdentifier $ Type.IntegerType bs
     identify (B (BOOI  bs _)) = newIdentifier $ Type.IntegerType bs
     identify (B (OOI   bs _)) = newIdentifier $ Type.IntegerType bs
     identify _                = error "not implmented"
 
+    -- create a new identifier, put the identifier on the `operandStack` and
+    -- increment the global identifier tracker
     newIdentifier :: Type.Type -> Codegen Name.Name
     newIdentifier idType = do
       WasmModST { currentIdentifierNumber, operandStack } <- get
@@ -269,22 +307,29 @@ compileRetTypeList []  = Type.VoidType
 compileRetTypeList [t] = compileType t
 compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 
+-- compiles one WASM function into an LLVM function.
 compileFunction :: Natural -> S.Function -> Codegen Global.Global
 compileFunction indx func = do
-  -- reset currentIdentifierNumber for each function
-  modify (\env -> env { currentIdentifierNumber = 0})
+  -- reset `currentIdentifierNumber` and `operandStack` for each function
+  modify (\env -> env { currentIdentifierNumber = 0, operandStack = []})
   WasmModST { startFunctionIndex, operandStack, functionTypes } <- get
+  -- compile function type information
   let funcType   = functionTypes M.! (S.funcType func)
       returnType = compileRetTypeList $ S.results funcType
   paramList <- buildParamList $ S.params funcType
   let parameters = (paramList, False)
+      -- split the list of `LLVMObj` into blocks by looking for terminators. The
+      -- terminators and the code in the corresponding blocks are then
+      -- separated into an 'association list.'
       blks       = splitTerm <$> splitWhen isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
       namedBlks  = assignName <$> zip [0..] blks
       -- if indx == startIndex then "main" else "func{indx}". All the extra code
       -- handle the fact that startIndex may or may not have a value
       name = maybe (makeName "func" indx) id
         $ const "main" <$> (guard . (==indx) =<< startFunctionIndex)
+  -- the starting `currentIdentifierNumber` should be the number of parameters
   modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
+  -- compile basic blocks and collect the results
   basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
   pure $ Global.functionDefaults { Global.basicBlocks
                                  , Global.name
@@ -304,10 +349,13 @@ compileFunction indx func = do
         (i, t) <- zip [0..] l
         pure $ Global.Parameter (compileType t) (makeName "ident" i) []
 
+    -- split the last `LLVMObj` of a list of objects if it is a terminator. If
+    -- it isn't a terminator, this is the last instruction of the WASM function
+    -- and there is an implicit return.
     splitTerm :: [LLVMObj] -> (LLVMTerm, [LLVMObj])
     splitTerm []            = error "empty block"  -- this would be a bug
     splitTerm (Term t:rest) = (t, L.reverse rest)
-    splitTerm instrs        = (Lib.Ret, instrs)
+    splitTerm instrs        = (Ret, instrs)
 
 -- TODO: tables
 -- TODO: mems
