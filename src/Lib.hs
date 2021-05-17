@@ -2,20 +2,19 @@
 {-# LANGUAGE NamedFieldPuns #-}
 module Lib where
 
-import Control.Monad.State.Lazy
+import Control.Monad.RWS.Lazy
 import Control.Monad.Except
-import Data.Bifunctor
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Map as M
 import qualified Data.List as L
 import Data.Maybe
 import Data.Word
 import Debug.Trace
+
 import qualified Language.Wasm as Wasm
 import qualified Language.Wasm.Structure as S
 import qualified Language.Wasm.Structure (Function(..))
 
--- LLVM Stuff
 import qualified LLVM.AST as AST
 import qualified LLVM.AST.CallingConvention as Conv
 import qualified LLVM.AST.Constant as Constant
@@ -29,14 +28,20 @@ import Numeric.Natural
 import Utils (makeName, splitWhen)
 
 -- a record for a "global" state per WASM module
-data WasmModST = WasmModST { startFunctionIndex :: Maybe Natural
-                           , operandStack :: [AST.Operand]
-                           , currentIdentifierNumber :: Natural
-                           , functionTypes :: M.Map Natural S.FuncType }
+data WasmModST = WasmModST { operandStack :: [AST.Operand]
+                           , currentIdentifierNumber :: Natural }
                            deriving (Show)
 
--- an alias just to save some typing and make the type signatures a bit cleaner
-type Codegen = ExceptT String (State WasmModST)
+initWasmST = WasmModST { operandStack = [], currentIdentifierNumber = 0 }
+
+data WasmModEnv = WasmModEnv { startFunctionIndex :: Maybe Natural
+                             , functionTypes :: M.Map Natural S.FuncType }
+                             deriving (Show)
+
+-- an alias just to save some typing and make the type signatures a bit cleaner.
+-- RWS stands for Reader-Writer-State. The environment is immutable, whereas the
+-- state is.
+type Codegen = ExceptT String (RWS WasmModEnv () WasmModST)
 
 data LLVMInstr = B BinOp
                | U UnOp
@@ -205,7 +210,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
 
     stackToRetVal []  = AST.LocalReference Type.VoidType "void"
     stackToRetVal [x] = x
-    stackToRetVal l   = error "add support for multiple return vals" -- TODO: support multiple return values
+    stackToRetVal l   = error $ "add support for multiple return vals" ++ (trace (show l) "") -- TODO: support multiple return values
 
     -- This takes a 'chunk' of the block and turns it into a single LLVM
     -- instruction.
@@ -223,20 +228,18 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           -- the `operandStack` then peel off just the right amount of operands
           -- for the current instruction
           putOperandsOnStack rest
-          opStack <- operandStack <$> get
-          (a, b) <- case opStack of
-                      a:b:rest -> pure (a, b)
-                      _        -> fail "not enough operands"
+          a          <- popOperand
+          b          <- popOperand
           -- generate a new identifier for the intermediate result. In LLVM IR
           -- this amounts to saving the results to a 'variable.'
           identifier <- identify $ B op
           pure [identifier AST.:= buildBinOp op a b]
         munchBackwards (Instr (Call i):rest) = do
           putOperandsOnStack rest
-          WasmModST { functionTypes } <- get
+          WasmModEnv { functionTypes } <- ask
           let funcType       = functionTypes M.! i
               arguments      = S.params funcType
-              nArgs          = fromIntegral $ L.length $ arguments
+              nArgs          = L.length $ arguments
               argumentTypes  = compileType <$> arguments
               resultType     = compileRetTypeList $ S.results funcType
               name           = makeName "func" i
@@ -244,7 +247,10 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
                              $ AST.ConstantOperand
                              $ flip Constant.GlobalReference name 
                              $ Type.FunctionType resultType argumentTypes False
-          args       <- fetchOperands nArgs
+          -- pop the required number of operands off the `operandStack` and
+          -- collect the results into a list. `replicateM` deals with the
+          -- Codegen monad.
+          args       <- replicateM nArgs popOperand
           let arguments = [(operand, []) | operand <- args]
               instr     = AST.Call Nothing Conv.C [] function arguments [] []
           identifier <- newIdentifier resultType
@@ -257,19 +263,13 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           | all isLLVMOp l = putOperandsOnStack l *> pure []
           | otherwise      = error $ "AST.Instruction sequence not implemented: " ++ show l -- FIXME: complete me!!
 
-    -- a 'get operand' function generic over the number of operands it is
-    -- getting.
-    fetchOperands :: Natural -> Codegen [AST.Operand]
-    fetchOperands i = withExceptT (const "not enough operands") $ do
-      env@WasmModST { operandStack } <- get
-      -- attempt to take what is being requested
-      let operands = L.take (fromIntegral i) operandStack
-      -- if there are less operands on the `operandStack` than what is
-      -- specified, return an error.
-      guard $ L.length operands == fromIntegral i :: Codegen ()
-      -- remove the number of operands taken from the `operandStack`
-      put $ env { operandStack = L.drop (fromIntegral i) operandStack }
-      pure operands
+    -- pop operand off the `operandStack`
+    popOperand :: Codegen AST.Operand
+    popOperand = do
+      stack           <- operandStack <$> get
+      (operand, rest) <- maybe (fail "not enough operands") pure $ L.uncons stack
+      modify (\env -> env { operandStack = rest })
+      pure operand
 
     buildBinOp :: BinOp -> AST.Operand -> AST.Operand -> AST.Instruction
     buildBinOp (BBOOI _ op) = iop op
@@ -310,9 +310,9 @@ compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 -- compiles one WASM function into an LLVM function.
 compileFunction :: Natural -> S.Function -> Codegen Global.Global
 compileFunction indx func = do
-  -- reset `currentIdentifierNumber` and `operandStack` for each function
-  modify (\env -> env { currentIdentifierNumber = 0, operandStack = []})
-  WasmModST { startFunctionIndex, operandStack, functionTypes } <- get
+  -- reset WASM state
+  put initWasmST
+  WasmModEnv { startFunctionIndex, functionTypes } <- ask
   -- compile function type information
   let funcType   = functionTypes M.! (S.funcType func)
       returnType = compileRetTypeList $ S.results funcType
@@ -373,17 +373,13 @@ compileModule wasmMod = do
     }
   where
     startFunctionIndex = (\(S.StartFunction n) -> n) <$> S.start wasmMod
-    initModST = WasmModST { startFunctionIndex
-                          , operandStack = []
-                          , currentIdentifierNumber = 0
-                          , functionTypes = M.fromList $ zip [0..] $ S.types wasmMod
-                          }
+    functionTypes      = M.fromList $ zip [0..] $ S.types wasmMod
+    initEnv            = WasmModEnv { startFunctionIndex, functionTypes }
     -- extract functions from a WASM module and compile them
-    buildGlobalDefs = flip evalState initModST
-                    . runExceptT
-                    . traverse (uncurry compileFunction)
-                    . zip [0..]
-                    . S.functions
+    buildGlobalDefs wasmMod = fst $ evalRWS rws initEnv initWasmST
+      where
+        rws = runExceptT $ traverse (uncurry compileFunction)
+                         $ zip [0..] $ S.functions wasmMod
 
 parseModule :: B.ByteString -> Either String S.Module
 parseModule = Wasm.parse
