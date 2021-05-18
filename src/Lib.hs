@@ -1,5 +1,6 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
 import Control.Monad.Except
@@ -28,28 +29,30 @@ import qualified LLVM.AST.Type as Type
 import Numeric.Natural
 import Utils (makeName, splitAfter)
 
--- a record for a per-function state variables
+-- a record for per-function state variables
 data FuncST = FuncST { operandStack :: [AST.Operand]
                      , currentIdentifierNumber :: Natural }
                      deriving (Show)
 
 initFuncST = FuncST { operandStack = [], currentIdentifierNumber = 0 }
 
--- a record for read-only per-module constants
+-- a record for per-module constants
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , functionTypes :: M.Map Natural S.FuncType }
                      deriving (Show)
 
--- aliases just to save some typing and make the type signatures a bit cleaner.
-type ModGen = ExceptT String (Reader ModEnv)
-type FuncGen = StateT FuncST ModGen
+newtype ModGen a = ModGen { runModGen :: ExceptT String (Reader ModEnv) a }
+  deriving (Functor, Applicative, Monad, MonadReader ModEnv)
 
--- helper functions to generate the code
+newtype FuncGen a = FuncGen { runFuncGen :: StateT FuncST ModGen a }
+  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadState FuncST)
+
+-- helper functions. Not entirely following Haskell conventions here.
 evalModGen :: ModGen a -> ModEnv -> Either String a
-evalModGen a r = runReader (runExceptT a) r
+evalModGen a r = runReader (runExceptT (runModGen a)) r
 
 evalFuncGen :: FuncGen a -> FuncST -> ModGen a
-evalFuncGen = evalStateT
+evalFuncGen a = evalStateT (runFuncGen a)
 
 data LLVMInstr = B BinOp
                | U UnOp
@@ -349,7 +352,6 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
     namedBlks  = assignName <$> zip [0..] blks
 
-    funcGen :: FuncGen Global.Global
     funcGen = do
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
@@ -405,9 +407,7 @@ compileModule wasmMod = evalModGen modGen initModEnv
     functionTypes      = M.fromList $ zip [0..] $ S.types wasmMod
     initModEnv         = ModEnv { startFunctionIndex, functionTypes }
     wasmFuncs          = zip [0..] $ S.functions wasmMod
-
-    modGen :: ModGen AST.Module
-    modGen = do
+    modGen             = do
       globalDefs <- traverse (uncurry compileFunction) wasmFuncs
       pure $ AST.defaultModule
         { AST.moduleName = "basic",

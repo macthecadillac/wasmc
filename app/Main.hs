@@ -1,5 +1,6 @@
 module Main where
 
+import Control.Monad
 import qualified Data.ByteString.Lazy as B
 import Data.Either
 import qualified Data.Text.Lazy.IO as IO
@@ -14,4 +15,4 @@ main = do
   let fname = reverse $ dropWhile (not . (=='.')) $ reverse $ head fpath
   either (putStrLn . ("Error: " ++)) (IO.writeFile (fname ++ "ll") . ppllvm) $ compile src
   where
-    compile src = compileModule =<< parseModule src
+    compile = parseModule >=> compileModule
