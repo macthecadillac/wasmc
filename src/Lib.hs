@@ -180,7 +180,8 @@ compileInstr (S.Call i)               = Instr $ Call $ fromIntegral i
 
 -- Terminators (return, br etc)
 compileInstr S.Return       = Term Ret
--- TODO: must be handled by the split block routine
+-- TODO: must be handled by the split block routine since `b1` and `b2` are
+-- blocks by themselves.
 compileInstr (S.If _ b1 b2) = Term $ CondBrI (compileInstr <$> b1) (compileInstr <$> b2)
 compileInstr (S.Br i)       = Term $ Br i
 -- TODO: might need to be handled by the split block routine. WASM br_if will
@@ -339,6 +340,9 @@ compileFunction indx func = do
       -- split the list of `LLVMObj` into blocks by looking for terminators. The
       -- terminators and the code in the corresponding blocks are then
       -- separated into an 'association list.'
+      -- FIXME: splitAfter is not good enough since some blocks are nested under
+      -- `if` in WASM (and possibly other instructions). These need to be
+      -- un-nested into their own blocks in LLVM.
       blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
       namedBlks  = assignName <$> zip [0..] blks
       -- if indx == startIndex then "main" else "func{indx}". All the extra code
