@@ -382,6 +382,10 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     -- split the last `LLVMObj` of a list of objects if it is a terminator. If
     -- it isn't a terminator, this is the last instruction of the WASM function
     -- and there is an implicit return.
+    -- FIXME: the implicit return assumption is incorrect--a block could be a
+    -- result of an `if` branch, and if that is the case, at the end of the
+    -- block, we need to `br` back to the original line + 1 and continue
+    -- executing the next instruction instead of calling `ret`.
     splitTerm :: [LLVMObj] -> (LLVMTerm, [LLVMObj])
     splitTerm []            = error "empty block"  -- this would be a bug
     splitTerm (Term t:rest) = (t, L.reverse rest)
