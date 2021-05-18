@@ -2,8 +2,9 @@
 {-# LANGUAGE NamedFieldPuns #-}
 module Lib where
 
-import Control.Monad.RWS.Lazy
 import Control.Monad.Except
+import Control.Monad.Reader
+import Control.Monad.State.Lazy
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Map as M
 import qualified Data.List as L
@@ -27,21 +28,28 @@ import qualified LLVM.AST.Type as Type
 import Numeric.Natural
 import Utils (makeName, splitAfter)
 
--- a record for a "global" state per WASM module
-data WasmModST = WasmModST { operandStack :: [AST.Operand]
-                           , currentIdentifierNumber :: Natural }
-                           deriving (Show)
+-- a record for a per-function state variables
+data FuncST = FuncST { operandStack :: [AST.Operand]
+                     , currentIdentifierNumber :: Natural }
+                     deriving (Show)
 
-initWasmST = WasmModST { operandStack = [], currentIdentifierNumber = 0 }
+initFuncST = FuncST { operandStack = [], currentIdentifierNumber = 0 }
 
-data WasmModEnv = WasmModEnv { startFunctionIndex :: Maybe Natural
-                             , functionTypes :: M.Map Natural S.FuncType }
-                             deriving (Show)
+-- a record for read-only per-module constants
+data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
+                     , functionTypes :: M.Map Natural S.FuncType }
+                     deriving (Show)
 
--- an alias just to save some typing and make the type signatures a bit cleaner.
--- RWS stands for Reader-Writer-State. The environment is immutable, whereas the
--- state is.
-type Codegen = ExceptT String (RWS WasmModEnv () WasmModST)
+-- aliases just to save some typing and make the type signatures a bit cleaner.
+type ModGen = ExceptT String (Reader ModEnv)
+type FuncGen = StateT FuncST ModGen
+
+-- helper functions to generate the code
+evalModGen :: ModGen a -> ModEnv -> Either String a
+evalModGen a r = runReader (runExceptT a) r
+
+evalFuncGen :: FuncGen a -> FuncST -> ModGen a
+evalFuncGen = evalStateT
 
 data LLVMInstr = B BinOp
                | U UnOp
@@ -201,7 +209,7 @@ compileType S.F64 = Type.FloatingPointType Type.DoubleFP
 -- `llvmObjs` here is a list of `LLVMObj` that fits within one basic block--that
 -- is to say it must not contain terminators. The single terminator is
 -- separately passed in to the function.
-buildBasicBlock :: Name.Name -> LLVMTerm -> [LLVMObj] -> Codegen Global.BasicBlock
+buildBasicBlock :: Name.Name -> LLVMTerm -> [LLVMObj] -> FuncGen Global.BasicBlock
 buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> makeTerminator term
   where
     -- we define a chunk as a block of code that ends with an LLVM instruction.
@@ -209,7 +217,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     -- `llvmObjs` into a list of chunks.
     chunks = splitAfter isLLVMInstr llvmObjs
     -- we consume the chunks by munching them one at a time, collecting the
-    -- result with `traverse` which 'magically' handles the `Codegen` monad, and
+    -- result with `traverse` which 'magically' handles the `ModGen` monad, and
     -- concatenating the results into a list of LLVM instructions.
     llvmInstrs = L.concat <$> traverse munch chunks
 
@@ -218,7 +226,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     -- return when `ret` is called, so we need to gather what is on the
     -- `operandStack` and feed them to `AST.Ret`.
     -- TODO: we will need to expand this when we implement more terminators
-    makeTerminator :: LLVMTerm -> Codegen (AST.Named AST.Terminator)
+    makeTerminator :: LLVMTerm -> FuncGen (AST.Named AST.Terminator)
     makeTerminator Ret = do
       retVal <- stackToRetVal . operandStack <$> get
       modify (\env -> env { operandStack = [] })
@@ -235,7 +243,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     -- TODO: check the order at which WASM pops items off the stack and feeds
     -- them to the instructions--just check whether the behavior of `sub` in
     -- WASM matches that of the generated code.
-    munch :: [LLVMObj] -> Codegen [AST.Named AST.Instruction]
+    munch :: [LLVMObj] -> FuncGen [AST.Named AST.Instruction]
     -- the necessity of munching backwards has to do with how a linked-list
     -- is a representation of a stack
     munch = munchBackwards . L.reverse
@@ -254,7 +262,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           pure [identifier AST.:= buildBinOp op a b]
         munchBackwards (Instr (Call i):rest) = do
           pushOperands rest
-          WasmModEnv { functionTypes } <- ask
+          ModEnv { functionTypes } <- ask
           let funcType       = functionTypes M.! i
               arguments      = S.params funcType
               nArgs          = L.length $ arguments
@@ -267,7 +275,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
                              $ Type.FunctionType resultType argumentTypes False
           -- pop the required number of operands off the `operandStack` and
           -- collect the results into a list. `replicateM` deals with the
-          -- Codegen monad.
+          -- ModGen monad.
           args       <- replicateM nArgs popOperand
           let arguments = [(operand, []) | operand <- args]
               instr     = AST.Call Nothing Conv.C [] function arguments [] []
@@ -282,19 +290,19 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           | otherwise      = error $ "AST.Instruction sequence not implemented: " ++ show l -- FIXME: complete me!!
 
     -- pop operand off the `operandStack`
-    popOperand :: Codegen AST.Operand
+    popOperand :: FuncGen AST.Operand
     popOperand = do
       stack           <- operandStack <$> get
       (operand, rest) <- maybe (fail "not enough operands") pure $ L.uncons stack
       modify (\env -> env { operandStack = rest })
       pure operand
 
-    pushOperand :: LLVMObj -> Codegen ()
+    pushOperand :: LLVMObj -> FuncGen ()
     pushOperand a
       | isLLVMOp a = modify (\env -> env { operandStack = unwrapOp a : operandStack env })
       | otherwise  = error $ "Not an operand: " ++ show a
 
-    pushOperands :: [LLVMObj] -> Codegen ()
+    pushOperands :: [LLVMObj] -> FuncGen ()
     pushOperands = sequence_ . fmap pushOperand
 
     buildBinOp :: BinOp -> AST.Operand -> AST.Operand -> AST.Instruction
@@ -302,7 +310,7 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     buildBinOp (FOOI  _ op) = fop op
     buildBinOp o          = error $ "Not implemented for binop type: " ++ show o
 
-    identify :: LLVMInstr -> Codegen Name.Name
+    identify :: LLVMInstr -> FuncGen Name.Name
     identify (B (BBOOI bs _)) = newIdentifier $ Type.IntegerType bs
     identify (B (BOOI  bs _)) = newIdentifier $ Type.IntegerType bs
     identify (B (OOI   bs _)) = newIdentifier $ Type.IntegerType bs
@@ -310,9 +318,9 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
 
     -- create a new identifier, put the identifier on the `operandStack` and
     -- increment the global identifier tracker
-    newIdentifier :: Type.Type -> Codegen Name.Name
+    newIdentifier :: Type.Type -> FuncGen Name.Name
     newIdentifier idType = do
-      WasmModST { currentIdentifierNumber, operandStack } <- get
+      FuncST { currentIdentifierNumber, operandStack } <- get
       let name       = makeName "ident" $ currentIdentifierNumber + 1
           identifier = AST.LocalReference idType name
       modify (\env -> env {
@@ -327,45 +335,45 @@ compileRetTypeList [t] = compileType t
 compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 
 -- compiles one WASM function into an LLVM function.
-compileFunction :: Natural -> S.Function -> Codegen Global.Global
-compileFunction indx func = do
-  -- reset WASM state
-  put initWasmST
-  WasmModEnv { startFunctionIndex, functionTypes } <- ask
-  -- compile function type information
-  let funcType   = functionTypes M.! (S.funcType func)
-      returnType = compileRetTypeList $ S.results funcType
-  paramList <- buildParamList $ S.params funcType
-  let parameters = (paramList, False)
-      -- split the list of `LLVMObj` into blocks by looking for terminators. The
-      -- terminators and the code in the corresponding blocks are then
-      -- separated into an 'association list.'
-      -- FIXME: splitAfter is not good enough since some blocks are nested under
-      -- `if` in WASM (and possibly other instructions). These need to be
-      -- un-nested into their own blocks in LLVM.
-      blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
-      namedBlks  = assignName <$> zip [0..] blks
-      -- if indx == startIndex then "main" else "func{indx}". All the extra code
-      -- handle the fact that startIndex may or may not have a value
-      name = maybe (makeName "func" indx) id
-        $ const "main" <$> (guard . (==indx) =<< startFunctionIndex)
-  -- the starting `currentIdentifierNumber` should be the number of parameters
-  modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
-  -- compile basic blocks and collect the results
-  basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
-  pure $ Global.functionDefaults { Global.basicBlocks
-                                 , Global.name
-                                 , Global.returnType
-                                 , Global.parameters }
+compileFunction :: Natural -> S.Function -> ModGen Global.Global
+compileFunction indx func = evalFuncGen funcGen initFuncST
   where
-    llvmObjs = compileInstr <$> Language.Wasm.Structure.body func
-
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
+    llvmObjs   = compileInstr <$> Language.Wasm.Structure.body func
+    -- split the list of `LLVMObj` into blocks by looking for terminators. The
+    -- terminators and the code in the corresponding blocks are then
+    -- separated into an 'association list.'
+    -- FIXME: splitAfter is not good enough since some blocks are nested under
+    -- `if` in WASM (and possibly other instructions). These need to be
+    -- un-nested into their own blocks in LLVM.
+    blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
+    namedBlks  = assignName <$> zip [0..] blks
 
-    buildParamList :: [S.ValueType] -> Codegen [Global.Parameter]
-    buildParamList l = do  -- Codegen monad
+    funcGen :: FuncGen Global.Global
+    funcGen = do
+      ModEnv { startFunctionIndex, functionTypes } <- ask
+      -- compile function type information
+      let funcType   = functionTypes M.! (S.funcType func)
+          returnType = compileRetTypeList $ S.results funcType
+      paramList <- buildParamList $ S.params funcType
+      let parameters = (paramList, False)
+          -- if indx == startIndex then "main" else "func{indx}". All the extra code
+          -- handle the fact that startIndex may or may not have a value
+          name = maybe (makeName "func" indx) id
+            $ const "main" <$> (guard . (==indx) =<< startFunctionIndex)
+      -- the starting `currentIdentifierNumber` should be the number of parameters
+      modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
+      -- compile basic blocks and collect the results
+      basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
+      pure $ Global.functionDefaults { Global.basicBlocks
+                                     , Global.name
+                                     , Global.returnType
+                                     , Global.parameters }
+
+    buildParamList :: [S.ValueType] -> FuncGen [Global.Parameter]
+    buildParamList l = do  -- FuncGen monad
       let nargs = fromIntegral $ L.length l
-      env@WasmModST { currentIdentifierNumber } <- get
+      env@FuncST { currentIdentifierNumber } <- get
       put $ env { currentIdentifierNumber = currentIdentifierNumber + nargs }
       pure $ do  -- List monad
         (i, t) <- zip [0..] l
@@ -387,25 +395,20 @@ compileFunction indx func = do
 -- TODO: imports
 -- TODO: exports
 compileModule :: S.Module -> Either String AST.Module
-compileModule wasmMod = do
-  globalDefs <- buildGlobalDefs wasmMod
-  pure $ AST.defaultModule
-    { AST.moduleName = "basic",
-      AST.moduleDefinitions = [AST.GlobalDefinition def | def <- globalDefs]
-    }
+compileModule wasmMod = evalModGen modGen initModEnv
   where
     startFunctionIndex = (\(S.StartFunction n) -> n) <$> S.start wasmMod
     functionTypes      = M.fromList $ zip [0..] $ S.types wasmMod
-    initEnv            = WasmModEnv { startFunctionIndex, functionTypes }
-    -- extract functions from a WASM module and compile them
-    buildGlobalDefs wasmMod = evalCodegen codegen initEnv initWasmST
-      where
-        -- runner of the code generator
-        evalCodegen a r s = fst $ evalRWS (runExceptT a) r s
-        -- code generator for the functions in the module
-        codegen = traverse (uncurry compileFunction)
-                $ zip [0..]
-                $ S.functions wasmMod
+    initModEnv         = ModEnv { startFunctionIndex, functionTypes }
+    wasmFuncs          = zip [0..] $ S.functions wasmMod
+
+    modGen :: ModGen AST.Module
+    modGen = do
+      globalDefs <- traverse (uncurry compileFunction) wasmFuncs
+      pure $ AST.defaultModule
+        { AST.moduleName = "basic",
+          AST.moduleDefinitions = [AST.GlobalDefinition def | def <- globalDefs]
+        }
 
 parseModule :: B.ByteString -> Either String S.Module
 parseModule = Wasm.parse
