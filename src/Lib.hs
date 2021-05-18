@@ -34,11 +34,14 @@ data FuncST = FuncST { operandStack :: [AST.Operand]
                      , currentIdentifierNumber :: Natural }
                      deriving (Show)
 
-initFuncST = FuncST { operandStack = [], currentIdentifierNumber = 0 }
+initFuncST = FuncST [] 0
+
+data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
+  deriving (Show)
 
 -- a record for per-module constants
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
-                     , functionTypes :: M.Map Natural S.FuncType }
+                     , functionTypes :: M.Map Natural FunctionType }
                      deriving (Show)
 
 newtype ModGen a = ModGen { runModGen :: ExceptT String (Reader ModEnv) a }
@@ -206,6 +209,12 @@ compileType S.I64 = Type.IntegerType 64
 compileType S.F32 = Type.FloatingPointType Type.FloatFP
 compileType S.F64 = Type.FloatingPointType Type.DoubleFP
 
+compileFunctionType :: S.FuncType -> FunctionType
+compileFunctionType S.FuncType { S.params, S.results } = FT arguments returnType
+  where
+    arguments  = compileType <$> params
+    returnType = Type.StructureType False $ compileType <$> results
+
 -- this builds a basic block. A basic block is a single-entry-single-exit block
 -- of code. Here it means it is a block of code that has an identifier and a
 -- terminator (see the llvm-hs-pure docs for specifics) as its last instruction.
@@ -266,23 +275,20 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
         munchBackwards (Instr (Call i):rest) = do
           pushOperands rest
           ModEnv { functionTypes } <- ask
-          let funcType       = functionTypes M.! i
-              arguments      = S.params funcType
-              nArgs          = L.length $ arguments
-              argumentTypes  = compileType <$> arguments
-              resultType     = compileRetTypeList $ S.results funcType
-              name           = makeName "func" i
-              function       = Right
-                             $ AST.ConstantOperand
-                             $ flip Constant.GlobalReference name 
-                             $ Type.FunctionType resultType argumentTypes False
+          let FT { arguments, returnType } = functionTypes M.! i
+              nArgs                        = L.length $ arguments
+              name                         = makeName "func" i
+              function                     = Right
+                                           $ AST.ConstantOperand
+                                           $ flip Constant.GlobalReference name 
+                                           $ Type.FunctionType returnType arguments False
           -- pop the required number of operands off the `operandStack` and
           -- collect the results into a list. `replicateM` deals with the
-          -- ModGen monad.
+          -- FuncGen monad.
           args       <- replicateM nArgs popOperand
           let arguments = [(operand, []) | operand <- args]
               instr     = AST.Call Nothing Conv.C [] function arguments [] []
-          identifier <- newIdentifier resultType
+          identifier <- newIdentifier returnType
           pure [identifier AST.:= instr]
         munchBackwards l
             -- any chunk that does not end with an instruction is likely the
@@ -355,9 +361,8 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     funcGen = do
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
-      let funcType   = functionTypes M.! (S.funcType func)
-          returnType = compileRetTypeList $ S.results funcType
-      paramList <- buildParamList $ S.params funcType
+      let FT { arguments, returnType } = functionTypes M.! (S.funcType func)
+      paramList <- buildParamList arguments
       let parameters = (paramList, False)
           -- if indx == startIndex then "main" else "func{indx}". All the extra code
           -- handle the fact that startIndex may or may not have a value
@@ -372,14 +377,12 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
                                      , Global.returnType
                                      , Global.parameters }
 
-    buildParamList :: [S.ValueType] -> FuncGen [Global.Parameter]
-    buildParamList l = do  -- FuncGen monad
+    buildParamList :: [Type.Type] -> FuncGen [Global.Parameter]
+    buildParamList l = do
       let nargs = fromIntegral $ L.length l
       env@FuncST { currentIdentifierNumber } <- get
       put $ env { currentIdentifierNumber = currentIdentifierNumber + nargs }
-      pure $ do  -- List monad
-        (i, t) <- zip [0..] l
-        pure $ Global.Parameter (compileType t) (makeName "ident" i) []
+      pure [Global.Parameter t (makeName "ident" i) [] | (i, t) <- zip [0..] l]
 
     -- split the last `LLVMObj` of a list of objects if it is a terminator. If
     -- it isn't a terminator, this is the last instruction of the WASM function
@@ -404,14 +407,14 @@ compileModule :: S.Module -> Either String AST.Module
 compileModule wasmMod = evalModGen modGen initModEnv
   where
     startFunctionIndex = (\(S.StartFunction n) -> n) <$> S.start wasmMod
-    functionTypes      = M.fromList $ zip [0..] $ S.types wasmMod
-    initModEnv         = ModEnv { startFunctionIndex, functionTypes }
+    functionTypes      = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
+    initModEnv         = ModEnv startFunctionIndex functionTypes
     wasmFuncs          = zip [0..] $ S.functions wasmMod
     modGen             = do
       globalDefs <- traverse (uncurry compileFunction) wasmFuncs
       pure $ AST.defaultModule
         { AST.moduleName = "basic",
-          AST.moduleDefinitions = [AST.GlobalDefinition def | def <- globalDefs]
+          AST.moduleDefinitions = AST.GlobalDefinition <$> globalDefs
         }
 
 parseModule :: B.ByteString -> Either String S.Module
