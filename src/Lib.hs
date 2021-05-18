@@ -68,9 +68,18 @@ instance Show UnOp where
   show (BOI _) = "BOI"
 
 data LLVMTerm = Ret
+              | Br Natural
+              -- CondBrI and CondBrB are the same on the LLVM side but the way
+              -- they are treated in WASM-land is a bit different so this
+              -- arrangement is for convenience
+              | CondBrI [LLVMObj] [LLVMObj]
+              | CondBrB Natural
 
 instance Show LLVMTerm where
-  show Ret = "Ret"
+  show Ret             = "Ret"
+  show (Br i)          = "Br " ++ show i
+  show (CondBrI b1 b2) = "CondBrI " ++ show b1 ++ ", " ++ show b2
+  show (CondBrB i)     = "CondBrB " ++ show i
 
 type BOI =  Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
 type BOOI =  Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
@@ -170,7 +179,13 @@ compileInstr (S.IRelOp S.BS64 S.IGeS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SGE
 compileInstr (S.Call i)               = Instr $ Call $ fromIntegral i
 
 -- Terminators (return, br etc)
-compileInstr S.Return = Term Ret
+compileInstr S.Return       = Term Ret
+-- TODO: must be handled by the split block routine
+compileInstr (S.If _ b1 b2) = Term $ CondBrI (compileInstr <$> b1) (compileInstr <$> b2)
+compileInstr (S.Br i)       = Term $ Br i
+-- TODO: might need to be handled by the split block routine. WASM br_if will
+-- fall through if the bool is false
+compileInstr (S.BrIf i)     = Term $ CondBrB i
 compileInstr instr = error $ "Not implemented in compileInstr: " ++ show instr
 
 compileType :: S.ValueType -> Type.Type
@@ -207,6 +222,8 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
       retVal <- stackToRetVal . operandStack <$> get
       modify (\env -> env { operandStack = [] })
       pure $ AST.Do $ AST.Ret (Just retVal) []
+    makeTerminator (Br i) = pure $ AST.Do $ AST.Br (makeName "block" i) []
+    makeTerminator _ = error "not implemented"
 
     stackToRetVal []  = AST.LocalReference Type.VoidType "void"
     stackToRetVal [x] = x
@@ -377,11 +394,14 @@ compileModule wasmMod = do
     functionTypes      = M.fromList $ zip [0..] $ S.types wasmMod
     initEnv            = WasmModEnv { startFunctionIndex, functionTypes }
     -- extract functions from a WASM module and compile them
-    buildGlobalDefs wasmMod = fst $ evalRWS rws initEnv initWasmST
+    buildGlobalDefs wasmMod = evalCodegen codegen initEnv initWasmST
       where
-        rws = runExceptT $ traverse (uncurry compileFunction)
-                         $ zip [0..]
-                         $ S.functions wasmMod
+        -- runner of the code generator
+        evalCodegen a r s = fst $ evalRWS (runExceptT a) r s
+        -- code generator for the functions in the module
+        codegen = traverse (uncurry compileFunction)
+                $ zip [0..]
+                $ S.functions wasmMod
 
 parseModule :: B.ByteString -> Either String S.Module
 parseModule = Wasm.parse

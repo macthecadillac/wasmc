@@ -12,6 +12,6 @@ main = do
   fpath <- getArgs
   src   <- B.readFile $ head fpath
   let fname = reverse $ dropWhile (not . (=='.')) $ reverse $ head fpath
-  either print (IO.writeFile (fname ++ "ll") . ppllvm) $ compile src
+  either (putStrLn . ("Error: " ++)) (IO.writeFile (fname ++ "ll") . ppllvm) $ compile src
   where
     compile src = compileModule =<< parseModule src
