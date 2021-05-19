@@ -31,17 +31,18 @@ import Utils (makeName, splitAfter)
 
 -- a record for per-function state variables
 data FuncST = FuncST { operandStack :: [AST.Operand]
-                     , currentIdentifierNumber :: Natural }
+                     , currentIdentifierNumber :: Natural
+                     , localVariableTypes :: M.Map Natural Type.Type }
                      deriving (Show)
-
-initFuncST = FuncST [] 0
 
 data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
   deriving (Show)
 
 -- a record for per-module constants
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
-                     , functionTypes :: M.Map Natural FunctionType }
+                     , functionTypes :: M.Map Natural FunctionType
+                    --  , globalVariableTypes :: M.Map Natural Type.Type
+                      }
                      deriving (Show)
 
 newtype ModGen a = ModGen { runModGen :: ExceptT String (Reader ModEnv) a }
@@ -52,7 +53,7 @@ newtype FuncGen a = FuncGen { runFuncGen :: StateT FuncST ModGen a }
 
 -- helper functions. Not entirely following Haskell conventions here.
 evalModGen :: ModGen a -> ModEnv -> Either String a
-evalModGen a r = runReader (runExceptT (runModGen a)) r
+evalModGen a = runReader (runExceptT (runModGen a))
 
 evalFuncGen :: FuncGen a -> FuncST -> ModGen a
 evalFuncGen a = evalStateT (runFuncGen a)
@@ -60,6 +61,8 @@ evalFuncGen a = evalStateT (runFuncGen a)
 data LLVMInstr = B BinOp
                | U UnOp
                | Call Natural
+               | SetLocal Natural
+               | SetGlobal Natural
                deriving (Show)
 
 --           tag   bitsize/fp type   type  
@@ -103,8 +106,12 @@ type IOOI =  Pred.IntegerPredicate -> AST.Operand -> AST.Operand -> AST.Instruct
 type OOI = AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
 type MOI = Maybe AST.Operand -> AST.InstructionMetadata -> AST.Terminator
 
+data LLVMOp = Const     Constant.Constant
+            | GlobalRef Natural
+            | LocalRef  Natural
+
 data LLVMObj = Instr LLVMInstr
-             | Op AST.Operand
+             | Op   LLVMOp
              | Term LLVMTerm
              deriving (Show)
 
@@ -126,19 +133,36 @@ isLLVMTerm :: LLVMObj -> Bool
 isLLVMTerm (Term _) = True
 isLLVMTerm _        = False
 
-unwrapOp :: LLVMObj -> AST.Operand 
-unwrapOp (Op op) = op
+unwrapOp :: LLVMObj -> FuncGen AST.Operand 
+unwrapOp (Op (Const op))   = pure $ AST.ConstantOperand op
+unwrapOp (Op (LocalRef n)) = do
+  FuncST { localVariableTypes } <- get
+  let t = t M.! n
+  pure $ AST.LocalReference t $ makeName "local" n
 unwrapOp _       = error "not an operand"
 
 unwrapTerm :: LLVMObj -> LLVMTerm
 unwrapTerm (Term t) = t
 unwrapTerm _        = error "not a terminator"
 
+-- compileInstr_ :: S.Instruction Natural -> FuncGen LLVMObj
+-- compileInstr_ (S.IBinOp bs op) = do
+--   a <- popOperand
+--   b <- popOperand
+--   pure $ case op of
+--     S.IAdd -> iop op a b
+
+-- compileBitsize :: S.BitSize -> Word32
+-- compileBitsize S.BS32 = 32
+-- compileBitsize S.BS64 = 64
+
 compileInstr :: S.Instruction Natural -> LLVMObj
-compileInstr (S.I32Const n) = Op $ AST.ConstantOperand $ Constant.Int 32 $ fromIntegral n
-compileInstr (S.I64Const n) = Op $ AST.ConstantOperand $ Constant.Int 64 $ fromIntegral n
-compileInstr (S.F32Const n) = Op $ AST.ConstantOperand $ Constant.Float $ Float.Single n
-compileInstr (S.F64Const n) = Op $ AST.ConstantOperand $ Constant.Float $ Float.Double n
+compileInstr (S.I32Const n)  = Op $ Const $ Constant.Int 32 $ fromIntegral n
+compileInstr (S.I64Const n)  = Op $ Const $ Constant.Int 64 $ fromIntegral n
+compileInstr (S.F32Const n)  = Op $ Const $ Constant.Float $ Float.Single n
+compileInstr (S.F64Const n)  = Op $ Const $ Constant.Float $ Float.Double n
+compileInstr (S.GetGlobal n) = Op $ GlobalRef n
+compileInstr (S.GetLocal n)  = Op $ LocalRef n
 
 -- Binary Operations(IBinOPs)
 -- TODO: should use helper functions instead of explicitly matching the bitsize
@@ -190,6 +214,8 @@ compileInstr (S.IRelOp S.BS64 S.IGeS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SGE
 -- FUn Operations(FUnOPs) FAbs	 FNeg	 FCeil	 FFloor	 FTrunc	 FNearest	 FSqrt
 --compileInstr (S.FUnOp _ S.FAbs) = Instr $ IOOI Abs
 
+compileInstr (S.SetGlobal n)          = Instr $ SetGlobal n
+compileInstr (S.SetLocal n)           = Instr $ SetLocal n
 compileInstr (S.Call i)               = Instr $ Call $ fromIntegral i
 
 -- Terminators (return, br etc)
@@ -272,6 +298,9 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           -- this amounts to saving the results to a 'variable.'
           identifier <- identify $ B op
           pure [identifier AST.:= buildBinOp op a b]
+        -- munchBackwards (Instr (SetLocal n):rest) = do
+        --   pushOperands rest
+        --   a <- popOperand
         munchBackwards (Instr (Call i):rest) = do
           pushOperands rest
           ModEnv { functionTypes } <- ask
@@ -330,11 +359,11 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     newIdentifier :: Type.Type -> FuncGen Name.Name
     newIdentifier idType = do
       FuncST { currentIdentifierNumber, operandStack } <- get
-      let name       = makeName "ident" $ currentIdentifierNumber + 1
+      let name       = makeName "local" $ currentIdentifierNumber + 1
           identifier = AST.LocalReference idType name
       modify (\env -> env {
-         currentIdentifierNumber = currentIdentifierNumber + 1,
-         operandStack = identifier : operandStack
+          currentIdentifierNumber = currentIdentifierNumber + 1,
+          operandStack = identifier : operandStack
         })
       pure name
 
@@ -347,6 +376,8 @@ compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalFuncGen funcGen initFuncST
   where
+    initFuncST = FuncST [] 0 $ M.fromAscList $ zip [0..] localTypes
+
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     llvmObjs   = compileInstr <$> Language.Wasm.Structure.body func
     -- split the list of `LLVMObj` into blocks by looking for terminators. The
@@ -355,10 +386,10 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     -- FIXME: splitAfter is not good enough since some blocks are nested under
     -- `if` in WASM (and possibly other instructions). These need to be
     -- un-nested into their own blocks in LLVM.
+    localTypes = compileType <$> S.localTypes func :: [Type.Type]
     blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
     namedBlks  = assignName <$> zip [0..] blks
-
-    funcGen = do
+    funcGen    = do
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
       let FT { arguments, returnType } = functionTypes M.! (S.funcType func)
@@ -366,8 +397,8 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
       let parameters = (paramList, False)
           -- if indx == startIndex then "main" else "func{indx}". All the extra code
           -- handle the fact that startIndex may or may not have a value
-          name = maybe (makeName "func" indx) id
-            $ const "main" <$> (guard . (==indx) =<< startFunctionIndex)
+          name = maybe (makeName "func" indx) (const "main")
+            $ guard . (==indx) =<< startFunctionIndex
       -- the starting `currentIdentifierNumber` should be the number of parameters
       modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
       -- compile basic blocks and collect the results
@@ -382,7 +413,7 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
       let nargs = fromIntegral $ L.length l
       env@FuncST { currentIdentifierNumber } <- get
       put $ env { currentIdentifierNumber = currentIdentifierNumber + nargs }
-      pure [Global.Parameter t (makeName "ident" i) [] | (i, t) <- zip [0..] l]
+      pure [Global.Parameter t (makeName "local" i) [] | (i, t) <- zip [0..] l]
 
     -- split the last `LLVMObj` of a list of objects if it is a terminator. If
     -- it isn't a terminator, this is the last instruction of the WASM function
@@ -396,10 +427,39 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     splitTerm (Term t:rest) = (t, L.reverse rest)
     splitTerm instrs        = (Ret, instrs)
 
--- TODO: tables
+-- globals in the WASM sense of the term
+compileGlobals :: Natural -> S.Global -> ModGen AST.Global
+compileGlobals index global = globVar
+  where
+    globVar     = do
+      init' <- init
+      let initializer = Just init'
+      pure $ AST.globalVariableDefaults { Global.name
+                                        , Global.isConstant 
+                                        , Global.type'
+                                        , Global.initializer
+                                        }
+
+    name       = makeName "global" index
+    isConstant = isConst $ S.globalType global
+    type'      = compileType' $ S.globalType global
+    exp        = compileInstr <$> S.initializer global
+    init       = case compileInstr <$> S.initializer global of
+                   [Op (Const const)] -> pure const
+                   -- TODO: maybe there's a way around this? The wasm specs says
+                   -- the initializer should be `expr` which could really be
+                   -- anything. Not sure how to implement that into LLVM though.
+                   _                                -> fail "initializer not constant"
+
+    isConst (S.Const _) = True
+    isConst _           = False
+
+    compileType' (S.Const t) = compileType t
+    compileType' (S.Mut   t) = compileType t
+
+-- see todonotes for the eponymous
+-- TODO: tables, elems
 -- TODO: mems
--- TODO: globals
--- TODO: elems
 -- TODO: datas
 -- TODO: imports
 -- TODO: exports
@@ -409,12 +469,14 @@ compileModule wasmMod = evalModGen modGen initModEnv
     startFunctionIndex = (\(S.StartFunction n) -> n) <$> S.start wasmMod
     functionTypes      = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
     initModEnv         = ModEnv startFunctionIndex functionTypes
+    wasmGlobals        = zip [0..] $ S.globals wasmMod
     wasmFuncs          = zip [0..] $ S.functions wasmMod
     modGen             = do
-      globalDefs <- traverse (uncurry compileFunction) wasmFuncs
+      globals <- traverse (uncurry compileGlobals) wasmGlobals
+      defs    <- traverse (uncurry compileFunction) wasmFuncs
       pure $ AST.defaultModule
         { AST.moduleName = "basic",
-          AST.moduleDefinitions = AST.GlobalDefinition <$> globalDefs
+          AST.moduleDefinitions = AST.GlobalDefinition <$> defs
         }
 
 parseModule :: B.ByteString -> Either String S.Module
