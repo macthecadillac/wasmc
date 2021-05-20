@@ -7,6 +7,7 @@ import Control.Applicative ((<|>))
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State.Lazy
+import Data.Bifunctor
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Map as M
 import qualified Data.List as L
@@ -22,7 +23,8 @@ import qualified LLVM.AST as AST
 import qualified LLVM.AST.CallingConvention as Conv
 import qualified LLVM.AST.Constant as Constant
 import qualified LLVM.AST.Float as Float
-import qualified LLVM.AST.IntegerPredicate as Pred
+import qualified LLVM.AST.IntegerPredicate as IPred
+import qualified LLVM.AST.FloatingPointPredicate as FPred
 import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
@@ -32,7 +34,9 @@ import Utils (makeName, splitAfter)
 
 -- a record for per-function state variables
 data FuncST = FuncST { operandStack :: [AST.Operand]
-                     , currentIdentifierNumber :: Natural
+                     , localIdentifier :: Natural
+                     , blockIdentifier :: Natural
+                     , blockScopeStack :: [Name.Name]
                      , renameMap :: M.Map Name.Name Name.Name
                      , localConst :: M.Map Name.Name Constant.Constant
                      , localVariableTypes :: M.Map Name.Name Type.Type }
@@ -61,171 +65,242 @@ evalModGen a = runReader (runExceptT (runModGen a))
 evalFuncGen :: FuncGen a -> FuncST -> ModGen a
 evalFuncGen a = evalStateT (runFuncGen a)
 
-data LLVMInstr = B BinOp
-               | U UnOp
-               | Call Natural
-               | SetLocal Name.Name
-               | SetGlobal Name.Name
+type BOI    = Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
+type BOOI   = Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
+type BBOOI  = Bool -> Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
+type FOOI   = AST.FastMathFlags -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
+type POOI p = p -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
+type OOI    = AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
+type MOI    = Maybe AST.Operand -> AST.InstructionMetadata -> AST.Terminator
+
+type UnOpBuilder a = a -> AST.Operand -> AST.Instruction
+type BinOpBuilder a = a -> AST.Operand -> AST.Operand -> AST.Instruction
+type CmpBuilder a p = a -> p -> AST.Operand -> AST.Operand -> AST.Instruction
+
+boi :: UnOpBuilder BOI
+boi op a = op False a []
+
+booi :: BinOpBuilder BOOI
+booi op a b = op False a b []
+
+bbooi :: BinOpBuilder BBOOI
+bbooi op a b = op False False a b []
+
+fooi :: BinOpBuilder FOOI
+fooi op a b = op AST.noFastMathFlags a b []
+
+ooi :: BinOpBuilder OOI
+ooi op a b = op a b []
+
+pooi :: CmpBuilder (POOI p) p
+pooi p pred a b = p pred a b []
+
+data LLVMInstr = I (AST.Named AST.Instruction)
+               | T (AST.Named AST.Terminator)
                deriving (Show)
 
---           tag   bitsize/fp type   type  
-data BinOp = BBOOI Word32            BBOOI
-           | BOOI  Word32            BOOI
-           | FOOI  Type.FloatingPointType FOOI
-           | OOI   Word32            OOI
-           | IOOI                    IOOI
+isTerm :: LLVMInstr -> Bool
+isTerm (T _) = True
+isTerm _     = False
 
-instance Show BinOp where
-  show (BBOOI bs _) = show bs ++ " BBOOI"
-  show (BOOI  bs _) = show bs ++ " BOOI"
-  show (FOOI  fp _) = show fp ++ " FOOI"
-  show (OOI   bs _) = show bs ++ "OOI"
-  show (IOOI _)  = "IOOI"
+compileConst :: Constant.Constant -> FuncGen [LLVMInstr]
+compileConst const = (pushOperand $ AST.ConstantOperand const) *> pure []
 
-data UnOp = BOI BOI
+compileBinOp :: BinOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
+compileBinOp builder op t = do
+  b          <- popOperand
+  a          <- popOperand
+  -- generate a new identifier for the intermediate result. In LLVM IR
+  -- this amounts to saving the results to a 'variable.'
+  identifier <- newLocalIdentifier t
+  pure [I $ identifier AST.:= builder op a b]
 
-instance Show UnOp where
-  show (BOI _) = "BOI"
+compileUnOp :: UnOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
+compileUnOp builder op t = do
+  a          <- popOperand
+  identifier <- newLocalIdentifier t
+  pure [I $ identifier AST.:= builder op a]
 
-data LLVMTerm = Ret
-              | Br Natural
-              -- CondBrI and CondBrB are the same on the LLVM side but the way
-              -- they are treated in WASM-land is a bit different so this
-              -- arrangement is for convenience
-              | CondBrI [LLVMObj] [LLVMObj]
-              | CondBrB Natural
+compileCmpOp :: POOI p -> p -> Word32 -> FuncGen [LLVMInstr]
+compileCmpOp cmp pred bs = do
+  b          <- popOperand
+  a          <- popOperand
+  identifier <- newLocalIdentifier $ Type.IntegerType bs
+  pure [I $ identifier AST.:= pooi cmp pred a b]
 
-instance Show LLVMTerm where
-  show Ret             = "Ret"
-  show (Br i)          = "Br " ++ show i
-  show (CondBrI b1 b2) = "CondBrI " ++ show b1 ++ ", " ++ show b2
-  show (CondBrB i)     = "CondBrB " ++ show i
+iBitSize :: S.BitSize -> Word32
+iBitSize S.BS32 = 32
+iBitSize S.BS64 = 64
 
-type BOI =  Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
-type BOOI =  Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
-type BBOOI = Bool -> Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
-type FOOI = AST.FastMathFlags -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
-type IOOI =  Pred.IntegerPredicate -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
-type OOI = AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
-type MOI = Maybe AST.Operand -> AST.InstructionMetadata -> AST.Terminator
+fBitSize :: S.BitSize -> Type.FloatingPointType
+fBitSize S.BS32 = Type.FloatFP
+fBitSize S.BS64 = Type.DoubleFP
 
-data LLVMOp = Const     Constant.Constant
-            | GlobalRef Name.Name
-            | LocalRef  Name.Name
-            deriving (Show)
+compilefMinMax :: S.BitSize -> S.FRelOp -> FuncGen [LLVMInstr]
+compilefMinMax bs pred = do
+  b       <- popOperand
+  a       <- popOperand
+  pushOperand a
+  pushOperand b
+  pushOperand a
+  pushOperand b
+  operand <- compileInstr (S.FRelOp bs pred)
+  instr   <- compileInstr S.Select
+  pure $ operand ++ instr
 
-data LLVMObj = Instr LLVMInstr
-             | Op   LLVMOp
-             | Term LLVMTerm
-             deriving (Show)
+compileInstr :: S.Instruction Natural -> FuncGen [LLVMInstr]
+compileInstr (S.IBinOp bs S.IAdd)  = compileBinOp bbooi AST.Add  $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.ISub)  = compileBinOp bbooi AST.Sub  $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IMul)  = compileBinOp bbooi AST.Mul  $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IDivS) = compileBinOp booi  AST.SDiv $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IRemS) = compileBinOp ooi   AST.SRem $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IAnd)  = compileBinOp ooi   AST.And  $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IOr)   = compileBinOp ooi   AST.Or   $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IXor)  = compileBinOp ooi   AST.Xor  $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IShl)  = compileBinOp bbooi AST.Shl  $ Type.IntegerType $ iBitSize bs
 
-iop :: BBOOI -> AST.Operand -> AST.Operand -> AST.Instruction
-iop op a b = op False False a b []
+compileInstr (S.IRelOp bs S.IEq)   = compileCmpOp AST.ICmp IPred.EQ  $ iBitSize bs
+compileInstr (S.IRelOp bs S.INe)   = compileCmpOp AST.ICmp IPred.NE  $ iBitSize bs
+compileInstr (S.IRelOp bs S.ILtU)  = compileCmpOp AST.ICmp IPred.ULT $ iBitSize bs
+compileInstr (S.IRelOp bs S.ILtS)  = compileCmpOp AST.ICmp IPred.SLT $ iBitSize bs
+compileInstr (S.IRelOp bs S.IGtU)  = compileCmpOp AST.ICmp IPred.UGT $ iBitSize bs
+compileInstr (S.IRelOp bs S.IGtS)  = compileCmpOp AST.ICmp IPred.SGT $ iBitSize bs
+compileInstr (S.IRelOp bs S.ILeU)  = compileCmpOp AST.ICmp IPred.ULE $ iBitSize bs
+compileInstr (S.IRelOp bs S.ILeS)  = compileCmpOp AST.ICmp IPred.SLE $ iBitSize bs
+compileInstr (S.IRelOp bs S.IGeU)  = compileCmpOp AST.ICmp IPred.UGE $ iBitSize bs
+compileInstr (S.IRelOp bs S.IGeS)  = compileCmpOp AST.ICmp IPred.SGE $ iBitSize bs
 
-fop :: FOOI -> AST.Operand -> AST.Operand -> AST.Instruction
-fop op a b = op AST.noFastMathFlags a b []
+compileInstr (S.FBinOp bs S.FAdd)  = compileBinOp fooi AST.FAdd $ Type.FloatingPointType $ fBitSize bs
+compileInstr (S.FBinOp bs S.FSub)  = compileBinOp fooi AST.FSub $ Type.FloatingPointType $ fBitSize bs
+compileInstr (S.FBinOp bs S.FMul)  = compileBinOp fooi AST.FMul $ Type.FloatingPointType $ fBitSize bs
+compileInstr (S.FBinOp bs S.FDiv)  = compileBinOp fooi AST.FDiv $ Type.FloatingPointType $ fBitSize bs
+compileInstr (S.FBinOp bs S.FMin)  = compilefMinMax bs S.FLt
+compileInstr (S.FBinOp bs S.FMax)  = compilefMinMax bs S.FGt
+-- value of the first argument, sign of the second argument
+-- compileInstr (S.FBinOp bs S.FCopySign) = compileBinOp booi  AST.SDiv $ Type.IntegerType $ iBitSize bs
 
-isLLVMInstr :: LLVMObj -> Bool
-isLLVMInstr (Instr _) = True
-isLLVMInstr _         = False
+compileInstr (S.FRelOp bs S.FEq)   = compileCmpOp AST.FCmp FPred.OEQ $ iBitSize bs
+compileInstr (S.FRelOp bs S.FNe)   = compileCmpOp AST.FCmp FPred.ONE $ iBitSize bs
+compileInstr (S.FRelOp bs S.FLt)   = compileCmpOp AST.FCmp FPred.OLT $ iBitSize bs
+compileInstr (S.FRelOp bs S.FGt)   = compileCmpOp AST.FCmp FPred.OGT $ iBitSize bs
+compileInstr (S.FRelOp bs S.FLe)   = compileCmpOp AST.FCmp FPred.OLE $ iBitSize bs
+compileInstr (S.FRelOp bs S.FGe)   = compileCmpOp AST.FCmp FPred.OGE $ iBitSize bs
 
-isLLVMOp :: LLVMObj -> Bool
-isLLVMOp (Op _) = True
-isLLVMOp _      = False
+compileInstr S.Select              = do
+  cond       <- popOperand
+  false      <- popOperand
+  true       <- popOperand
+  identifier <- newLocalIdentifier $ operandType true
+  pure [I $ identifier AST.:= AST.Select cond true false []]
 
-isLLVMTerm :: LLVMObj -> Bool
-isLLVMTerm (Term _) = True
-isLLVMTerm _        = False
+compileInstr (S.I32Const n)        = compileConst $ Constant.Int 32 $ fromIntegral n
+compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegral n
+compileInstr (S.F32Const n)        = compileConst $ Constant.Float $ Float.Single n
+compileInstr (S.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
 
-unwrapOp :: LLVMObj -> FuncGen AST.Operand 
-unwrapOp (Op (Const op))   = pure $ AST.ConstantOperand op
-unwrapOp (Op (LocalRef n)) = do
+compileInstr (S.SetGlobal n)       = error "not implemented: SetGlobal"
+compileInstr (S.SetLocal n)        = do
+  -- if there is a constant associated to the variable, remove it
+  let ident = makeName "local" n
+  unassignConstant ident
+  a <- popOperand
+  case a of
+    -- for references, this is acieved by renaming identifiers at the
+    -- end
+    (AST.LocalReference _ name) -> addRenameAction name ident *> pure []
+    (AST.ConstantOperand const) -> assignConstant ident const *> pure []
+    _                           -> error "unsupported operand"
+
+compileInstr (S.GetGlobal n)       = error "not implemented: GetGlobal"
+compileInstr (S.GetLocal n)        = do
   FuncST { localVariableTypes, localConst } <- get
   -- `<|>` is the choice operator. It tries the first branch, and if it fails,
   -- goes on to try the second branch.
-  withMsg $ const localConst <|> ref localVariableTypes
+  operand <- withMsg $ const localConst <|> ref localVariableTypes
+  pushOperand operand
+  pure []
     where
-      ref m = AST.LocalReference <$> M.lookup n m <*> pure n
-      const m = AST.ConstantOperand <$> M.lookup n m
-      withMsg = maybe (fail $ "unbound reference: " ++ show n) pure
-unwrapOp a       = error $ "not an operand" ++ show a
+      name = makeName "local" n
+      ref m = AST.LocalReference <$> M.lookup name m <*> pure name
+      const m = AST.ConstantOperand <$> M.lookup name m
+      withMsg = maybe (fail $ "unbound reference: " ++ show name) pure
 
-unwrapTerm :: LLVMObj -> LLVMTerm
-unwrapTerm (Term t) = t
-unwrapTerm _        = error "not a terminator"
+compileInstr (S.Call i) = do
+  ModEnv { functionTypes } <- ask
+  let FT { arguments, returnType } = functionTypes M.! i
+      nArgs                        = L.length $ arguments
+      name                         = makeName "func" i
+      function                     = Right
+                                   $ AST.ConstantOperand
+                                   $ flip Constant.GlobalReference name 
+                                   $ Type.FunctionType returnType arguments False
+  -- pop the required number of operands off the `operandStack` and
+  -- collect the results into a list. `replicateM` deals with the
+  -- FuncGen monad.
+  args       <- replicateM nArgs popOperand
+  let arguments = [(operand, []) | operand <- args]
+      instr     = AST.Call Nothing Conv.C [] function arguments [] []
+  identifier <- newLocalIdentifier returnType
+  pure [I $ identifier AST.:= instr]
 
-compileInstr :: S.Instruction Natural -> LLVMObj
-compileInstr (S.I32Const n)  = Op $ Const $ Constant.Int 32 $ fromIntegral n
-compileInstr (S.I64Const n)  = Op $ Const $ Constant.Int 64 $ fromIntegral n
-compileInstr (S.F32Const n)  = Op $ Const $ Constant.Float $ Float.Single n
-compileInstr (S.F64Const n)  = Op $ Const $ Constant.Float $ Float.Double n
-compileInstr (S.GetGlobal n) = Op $ GlobalRef $ makeName "global" n
-compileInstr (S.GetLocal n)  = Op $ LocalRef $ makeName "local" n
+-- TODO: will need to be modified for multiple returns. Think about the
+-- difference branches and residual items on the stack before entering each
+-- branch
+compileInstr S.Return = pure . T <$> returnOperandStackItems
 
--- Binary Operations(IBinOPs)
--- TODO: should use helper functions instead of explicitly matching the bitsize
-compileInstr (S.IBinOp S.BS32 S.IAdd)  = Instr $ B $ BBOOI 32 AST.Add
-compileInstr (S.IBinOp S.BS32 S.ISub)  = Instr $ B $ BBOOI 32 AST.Sub 
-compileInstr (S.IBinOp S.BS32 S.IMul)  = Instr $ B $ BBOOI 32 AST.Mul
-compileInstr (S.IBinOp S.BS32 S.IDivS) = Instr $ B $ BOOI  32 AST.SDiv
-compileInstr (S.IBinOp S.BS32 S.IRemS) = Instr $ B $ OOI   32 AST.SRem
-compileInstr (S.IBinOp S.BS32 S.IAnd)  = Instr $ B $ OOI   32 AST.And 
-compileInstr (S.IBinOp S.BS32 S.IOr)   = Instr $ B $ OOI   32 AST.Or
-compileInstr (S.IBinOp S.BS32 S.IXor)  = Instr $ B $ OOI   32 AST.Xor
-compileInstr (S.IBinOp S.BS32 S.IShl)  = Instr $ B $ BBOOI 32 AST.Shl
+compileInstr (S.If _ b1 b2) = do
+  blockIndx <- blockIdentifier <$> get
+  modify (\st -> st { blockIdentifier = blockIndx + 1 })
+  let b1SubBlocks = countBlocks b1
+      b2SubBlocks = countBlocks b2
+      b1Ident     = makeName "block" $ blockIndx + 1
+      b2Ident     = makeName "block" $ blockIndx + b1SubBlocks + 1
+      fallthrough = makeName "block" (blockIndx + b1SubBlocks + b2SubBlocks)
+      term        = T $ AST.Do $ AST.Br fallthrough []
+      appendTerm  = appendIfLast (not . isTerm) term
+  operand    <- popOperand
+  b1Compiled <- fmap concat $ traverse compileInstr b1
+  b2Compiled <- fmap concat $ traverse compileInstr b2
+  let instr = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
+  pure $ instr : appendTerm b1Compiled ++ appendTerm b2Compiled
 
-compileInstr (S.IBinOp S.BS64 S.IAdd)  = Instr $ B $ BBOOI 64 AST.Add
-compileInstr (S.IBinOp S.BS64 S.ISub)  = Instr $ B $ BBOOI 64 AST.Sub 
-compileInstr (S.IBinOp S.BS64 S.IMul)  = Instr $ B $ BBOOI 64 AST.Mul
-compileInstr (S.IBinOp S.BS64 S.IDivS) = Instr $ B $ BOOI  64 AST.SDiv
-compileInstr (S.IBinOp S.BS64 S.IRemS) = Instr $ B $ OOI   64 AST.SRem
-compileInstr (S.IBinOp S.BS64 S.IAnd)  = Instr $ B $ OOI   64 AST.And 
-compileInstr (S.IBinOp S.BS64 S.IOr)   = Instr $ B $ OOI   64 AST.Or
-compileInstr (S.IBinOp S.BS64 S.IXor)  = Instr $ B $ OOI   64 AST.Xor
-compileInstr (S.IBinOp S.BS64 S.IShl)  = Instr $ B $ BBOOI 64 AST.Shl
--- count leading zeros, trailing zeros, popped vals (IUnOPs)//////TO FIX
---compileInstr (S.IUnOp _ S.IClz) = Instr $ -- Clz
---compileInstr (S.IUnOp _ S.ICtz) = Instr $ -- Ctz
---compileInstr (S.IUnOp _ S.IPopcnt) = Instr $ -- Popcnt
--- Relational Operations(IRelOPs) IEq	 INe	 ILtU	 ILtS	 IGtU	 IGtS	 ILeU	 ILeS	 IGeU	 IGeS
-compileInstr (S.IRelOp S.BS32 S.IEq)  = Instr $ B $ OOI 32 $ AST.ICmp Pred.EQ
-compileInstr (S.IRelOp S.BS32 S.INe)  = Instr $ B $ OOI 32 $ AST.ICmp Pred.NE
-compileInstr (S.IRelOp S.BS32 S.ILtU) = Instr $ B $ OOI 32 $ AST.ICmp Pred.ULT
-compileInstr (S.IRelOp S.BS32 S.ILtS) = Instr $ B $ OOI 32 $ AST.ICmp Pred.SLT
-compileInstr (S.IRelOp S.BS32 S.IGtU) = Instr $ B $ OOI 32 $ AST.ICmp Pred.UGT
-compileInstr (S.IRelOp S.BS32 S.IGtS) = Instr $ B $ OOI 32 $ AST.ICmp Pred.SGT
-compileInstr (S.IRelOp S.BS32 S.ILeU) = Instr $ B $ OOI 32 $ AST.ICmp Pred.ULE
-compileInstr (S.IRelOp S.BS32 S.ILeS) = Instr $ B $ OOI 32 $ AST.ICmp Pred.SLE
-compileInstr (S.IRelOp S.BS32 S.IGeU) = Instr $ B $ OOI 32 $ AST.ICmp Pred.UGE
-compileInstr (S.IRelOp S.BS32 S.IGeS) = Instr $ B $ OOI 32 $ AST.ICmp Pred.SGE
+-- the index here is the levels of scopes. It's a WASM peculiarity
+compileInstr (S.Br i)       = do
+  dest <- readScope $ fromIntegral i
+  pure [T $ AST.Do $ AST.Br dest []]
 
-compileInstr (S.IRelOp S.BS64 S.IEq)  = Instr $ B $ OOI 64 $ AST.ICmp Pred.EQ
-compileInstr (S.IRelOp S.BS64 S.INe)  = Instr $ B $ OOI 64 $ AST.ICmp Pred.NE
-compileInstr (S.IRelOp S.BS64 S.ILtU) = Instr $ B $ OOI 64 $ AST.ICmp Pred.ULT
-compileInstr (S.IRelOp S.BS64 S.ILtS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SLT
-compileInstr (S.IRelOp S.BS64 S.IGtU) = Instr $ B $ OOI 64 $ AST.ICmp Pred.UGT
-compileInstr (S.IRelOp S.BS64 S.IGtS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SGT
-compileInstr (S.IRelOp S.BS64 S.ILeU) = Instr $ B $ OOI 64 $ AST.ICmp Pred.ULE
-compileInstr (S.IRelOp S.BS64 S.ILeS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SLE
-compileInstr (S.IRelOp S.BS64 S.IGeU) = Instr $ B $ OOI 64 $ AST.ICmp Pred.UGE
-compileInstr (S.IRelOp S.BS64 S.IGeS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SGE
--- FUn Operations(FUnOPs) FAbs	 FNeg	 FCeil	 FFloor	 FTrunc	 FNearest	 FSqrt
---compileInstr (S.FUnOp _ S.FAbs) = Instr $ IOOI Abs
+compileInstr (S.BrIf i)     = do
+  blockIndx <- blockIdentifier <$> get
+  dest      <- readScope $ fromIntegral i
+  operand   <- popOperand
+  let fallthrough = makeName "block" $ blockIndx + 1
+  pure [T $ AST.Do $ AST.CondBr operand dest fallthrough []]
 
-compileInstr (S.SetGlobal n)          = Instr $ SetGlobal $ makeName "global" n
-compileInstr (S.SetLocal n)           = Instr $ SetLocal  $ makeName "local" n
-compileInstr (S.Call i)               = Instr $ Call $ fromIntegral i
+compileInstr (S.Block _ body) = do
+  blockIndx <- blockIdentifier <$> get
+  modify (\st -> st { blockIdentifier = blockIndx + 1 })
+  let numberOfBlocks = countBlocks body
+      name           = makeName "block" (blockIndx + numberOfBlocks + 1)
+      term           = T $ AST.Do $ AST.Br name []
+      appendTerm     = appendIfLast (not . isTerm) term
+  pushScope name
+  compiled <- fmap concat $ traverse compileInstr body
+  popScope
+  pure $ appendTerm compiled
+    where
+      popScope = do
+        scopeStack <- blockScopeStack <$> get
+        (_, tail) <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
+        modify (\st -> st { blockScopeStack = tail })
+      pushScope :: Name.Name -> FuncGen ()
+      pushScope s = modify (\st -> st { blockScopeStack = s : blockScopeStack st })
 
--- Terminators (return, br etc)
-compileInstr S.Return       = Term Ret
--- TODO: must be handled by the split block routine since `b1` and `b2` are
--- blocks by themselves.
-compileInstr (S.If _ b1 b2) = Term $ CondBrI (compileInstr <$> b1) (compileInstr <$> b2)
-compileInstr (S.Br i)       = Term $ Br i
--- TODO: might need to be handled by the split block routine. WASM br_if will
--- fall through if the bool is false
-compileInstr (S.BrIf i)     = Term $ CondBrB i
-compileInstr instr = error $ "Not implemented in compileInstr: " ++ show instr
+compileInstr instr = error $ "not implemented: " ++ show instr
+
+readScope :: Int -> FuncGen Name.Name
+readScope i = do
+  scopeStack <- blockScopeStack <$> get
+  maybe (error "Undefined scope") (pure . snd) $ L.find ((i==) . fst) $ zip [0..] scopeStack
 
 compileType :: S.ValueType -> Type.Type
 compileType S.I32 = Type.IntegerType 32
@@ -239,192 +314,112 @@ compileFunctionType S.FuncType { S.params, S.results } = FT arguments returnType
     arguments  = compileType <$> params
     returnType = compileRetTypeList results
 
--- this builds a basic block. A basic block is a single-entry-single-exit block
--- of code. Here it means it is a block of code that has an identifier and a
--- terminator (see the llvm-hs-pure docs for specifics) as its last instruction.
--- `llvmObjs` here is a list of `LLVMObj` that fits within one basic block--that
--- is to say it must not contain terminators. The single terminator is
--- separately passed in to the function.
-buildBasicBlock :: Name.Name -> Maybe LLVMTerm -> [LLVMObj] -> FuncGen Global.BasicBlock
-buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> makeTerminator term
-  where
-    -- we define a chunk as a block of code that ends with an LLVM instruction.
-    -- This excludes consts, set and get in the WASM world. Here we divide
-    -- `llvmObjs` into a list of chunks.
-    chunks = splitAfter isLLVMInstr llvmObjs
-    -- we consume the chunks by munching them one at a time, collecting the
-    -- result with `traverse` which 'magically' handles the `ModGen` monad, and
-    -- concatenating the results into a list of LLVM instructions.
-    llvmInstrs = renameLocals =<< L.concat <$> traverse munch chunks
+-- seriously, consider using lens
+unassignConstant :: Name.Name -> FuncGen ()
+unassignConstant name =
+  modify (\st -> st { localConst = M.delete name $ localConst st })
 
-    -- For `return`s, WASM always returns whatever is left on the stack at the
-    -- time of its invocation, whereas LLVM is very explicit about what to
-    -- return when `ret` is called, so we need to gather what is on the
-    -- `operandStack` and feed them to `AST.Ret`.
-    -- TODO: we will need to expand this when we implement more terminators
-    makeTerminator :: Maybe LLVMTerm -> FuncGen (AST.Named AST.Terminator)
-    makeTerminator Nothing       = returnOperandStackItems
-    makeTerminator (Just Ret)    = returnOperandStackItems
-    makeTerminator (Just (Br i)) = pure $ AST.Do $ AST.Br (makeName "block" i) []
-    makeTerminator _             = error "not implemented"
+assignConstant :: Name.Name -> Constant.Constant -> FuncGen ()
+assignConstant name const =
+  modify (\st -> st { localConst = M.insert name const $ localConst st })
 
-    returnOperandStackItems = do
-      FuncST { operandStack } <- get
-      let ret = do guard $ not $ L.null operandStack
-                   pure $ packValues operandStack
-      modify (\env -> env { operandStack = [] })
-      pure $ AST.Do $ AST.Ret ret []
+addRenameAction :: Name.Name -> Name.Name -> FuncGen ()
+addRenameAction name newName =
+  modify (\st -> st { renameMap = M.insert name newName $ renameMap st })
 
-    packValues []  = AST.LocalReference Type.VoidType "void"
-    packValues [x] = x
-    packValues l   = error "add support for multiple return vals"  -- TODO: support multiple return values
+-- pop operand off the `operandStack`
+popOperand :: FuncGen AST.Operand
+popOperand = do
+  stack           <- operandStack <$> get
+  (operand, rest) <- maybe (fail "not enough operands") pure $ L.uncons stack
+  modify (\st -> st { operandStack = rest })
+  pure operand
 
-    -- rename identifiers according to the rename map built during `munch`.
-    renameLocals :: [AST.Named AST.Instruction] -> FuncGen [AST.Named AST.Instruction]
-    renameLocals l = do
-      FuncST { renameMap } <- get
-      pure $ rename renameMap <$> l
-      where
-        rename map ((AST.:=) name instr) = (fromMaybe name $ M.lookup name map) AST.:= instr
+pushOperand :: AST.Operand -> FuncGen ()
+pushOperand op = modify (\st -> st { operandStack = op : operandStack st })
 
-    -- This takes a 'chunk' of the block and turns it into a single LLVM
-    -- instruction.
-    -- TODO: check the order at which WASM pops items off the stack and feeds
-    -- them to the instructions--just check whether the behavior of `sub` in
-    -- WASM matches that of the generated code.
-    munch :: [LLVMObj] -> FuncGen [AST.Named AST.Instruction]
-    -- the necessity of munching backwards has to do with how a linked-list
-    -- is a representation of a stack
-    munch = munchBackwards . L.reverse
-      where
-        munchBackwards [] = pure []
-        munchBackwards (Instr (B op):rest) = do
-          -- merge the explicitly provided operands in the current chunk with
-          -- the `operandStack` then peel off just the right amount of operands
-          -- for the current instruction
-          pushOperands =<< traverse unwrapOp rest
-          a          <- popOperand
-          b          <- popOperand
-          -- generate a new identifier for the intermediate result. In LLVM IR
-          -- this amounts to saving the results to a 'variable.'
-          identifier <- identify $ B op
-          pure [identifier AST.:= buildBinOp op a b]
-        -- for local.set instructions, we only have to change previously
-        -- assigned identifiers to the one corresponding to the target index.
-        -- We'll need to do that after the entire block is built.
-        munchBackwards (Instr (SetLocal n):rest) = do
-          pushOperands =<< traverse unwrapOp rest
-          -- if there is a constant associated to the variable, remove it
-          unassignConstant n
-          a <- popOperand
-          case a of
-            -- for references, this is acieved by renaming identifiers at the
-            -- end
-            (AST.LocalReference _ name) -> addRenameAction name n *> pure []
-            (AST.ConstantOperand const) -> assignConstant n const *> pure []
-            _                           -> error "unsupported operand"
-        munchBackwards (Instr (Call i):rest) = do
-          pushOperands =<< traverse unwrapOp rest
-          ModEnv { functionTypes } <- ask
-          let FT { arguments, returnType } = functionTypes M.! i
-              nArgs                        = L.length $ arguments
-              name                         = makeName "func" i
-              function                     = Right
-                                           $ AST.ConstantOperand
-                                           $ flip Constant.GlobalReference name 
-                                           $ Type.FunctionType returnType arguments False
-          -- pop the required number of operands off the `operandStack` and
-          -- collect the results into a list. `replicateM` deals with the
-          -- FuncGen monad.
-          args       <- replicateM nArgs popOperand
-          let arguments = [(operand, []) | operand <- args]
-              instr     = AST.Call Nothing Conv.C [] function arguments [] []
-          identifier <- newIdentifier returnType
-          pure [identifier AST.:= instr]
-        munchBackwards l
-            -- any chunk that does not end with an instruction is likely the
-            -- last chunk in the basic block and will be returned. Put them on
-            -- the `operandStack` and the `buildBasicBlock` function will deal
-            -- with the rest.
-          | all isLLVMOp l = traverse unwrapOp l >>= pushOperands >> pure []
-          | otherwise      = error $ "AST.Instruction sequence not implemented: " ++ show l -- FIXME: complete me!!
+pushOperands :: [AST.Operand] -> FuncGen ()
+pushOperands = sequence_ . fmap pushOperand
 
-    -- seriously, consider using lens
-    unassignConstant :: Name.Name -> FuncGen ()
-    unassignConstant name = do
-      st@FuncST { localConst } <- get
-      put $ st { localConst = M.delete name localConst }
+operandType :: AST.Operand -> Type.Type
+operandType (AST.LocalReference t _) = t
+operandType (AST.ConstantOperand (Constant.Int bs _)) = Type.IntegerType bs
+operandType (AST.ConstantOperand (Constant.Float (Float.Single _))) = Type.FloatingPointType Type.FloatFP
+operandType (AST.ConstantOperand (Constant.Float (Float.Double _))) = Type.FloatingPointType Type.DoubleFP
+operandType t = error $ "Not a recognized type: " ++ show t
 
-    assignConstant :: Name.Name -> Constant.Constant -> FuncGen ()
-    assignConstant name const = do
-      st@FuncST { localConst } <- get
-      put $ st { localConst = M.insert name const localConst }
+-- create a new identifier, put the identifier on the `operandStack` and
+-- increment the global identifier tracker
+newLocalIdentifier :: Type.Type -> FuncGen Name.Name
+newLocalIdentifier Type.VoidType = pure $ Name.mkName "void"
+newLocalIdentifier idType        = do
+  FuncST { localIdentifier, operandStack } <- get
+  let name       = makeName "tmp" $ localIdentifier
+      identifier = AST.LocalReference idType name
+  modify (\env -> env {
+      localIdentifier = localIdentifier + 1,
+      operandStack = identifier : operandStack
+    })
+  pure name
 
-    addRenameAction :: Name.Name -> Name.Name -> FuncGen ()
-    addRenameAction name newName = do
-      st@FuncST { renameMap } <- get
-      put $ st { renameMap = M.insert name newName renameMap }
+packValues :: [AST.Operand] -> AST.Operand
+packValues []  = AST.LocalReference Type.VoidType "void"
+packValues [x] = x
+packValues l   = error "add support for multiple return vals"  -- TODO: support multiple return values
 
-    -- pop operand off the `operandStack`
-    popOperand :: FuncGen AST.Operand
-    popOperand = do
-      stack           <- operandStack <$> get
-      (operand, rest) <- maybe (fail "not enough operands") pure $ L.uncons stack
-      modify (\env -> env { operandStack = rest })
-      pure operand
-
-    pushOperand :: AST.Operand -> FuncGen ()
-    pushOperand op = modify (\env -> env { operandStack = op : operandStack env })
-
-    pushOperands :: [AST.Operand] -> FuncGen ()
-    pushOperands = sequence_ . fmap pushOperand
-
-    buildBinOp :: BinOp -> AST.Operand -> AST.Operand -> AST.Instruction
-    buildBinOp (BBOOI _ op) = iop op
-    buildBinOp (FOOI  _ op) = fop op
-    buildBinOp o          = error $ "Not implemented for binop type: " ++ show o
-
-    identify :: LLVMInstr -> FuncGen Name.Name
-    identify (B (BBOOI bs _)) = newIdentifier $ Type.IntegerType bs
-    identify (B (BOOI  bs _)) = newIdentifier $ Type.IntegerType bs
-    identify (B (OOI   bs _)) = newIdentifier $ Type.IntegerType bs
-    identify _                = error "not implmented"
-
-    -- create a new identifier, put the identifier on the `operandStack` and
-    -- increment the global identifier tracker
-    newIdentifier :: Type.Type -> FuncGen Name.Name
-    newIdentifier Type.VoidType = pure $ Name.mkName "void"
-    newIdentifier idType        = do
-      FuncST { currentIdentifierNumber, operandStack } <- get
-      let name       = makeName "tmp" $ currentIdentifierNumber
-          identifier = AST.LocalReference idType name
-      modify (\env -> env {
-          currentIdentifierNumber = currentIdentifierNumber + 1,
-          operandStack = identifier : operandStack
-        })
-      pure name
+returnOperandStackItems :: FuncGen (AST.Named AST.Terminator)
+returnOperandStackItems = do
+  FuncST { operandStack } <- get
+  let ret = do guard $ not $ L.null operandStack
+               pure $ packValues operandStack
+  modify (\env -> env { operandStack = [] })
+  pure $ AST.Do $ AST.Ret ret []
 
 compileRetTypeList :: [S.ValueType] -> Type.Type
 compileRetTypeList []  = Type.VoidType
 compileRetTypeList [t] = compileType t
 compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 
+-- check if a wasm instruction will be compiled to a terminator in LLVM
+wasmIsTerm :: S.Instruction a -> Bool
+wasmIsTerm S.Return      = True
+wasmIsTerm (S.If _ _ _)  = True
+wasmIsTerm (S.Br _)      = True
+wasmIsTerm (S.BrIf _)    = True
+wasmIsTerm (S.Block _ _) = True
+wasmIsTerm _             = False
+
+appendIfLast :: (a -> Bool) -> a -> [a] -> [a]
+appendIfLast f a = L.reverse . aux . L.reverse
+  where
+    aux []       = []
+    aux l@(x:xs) | f x       = a : l
+                 | otherwise = l
+
+countBlocks :: [S.Instruction Natural] -> Natural
+countBlocks = fromIntegral . L.length . L.filter wasmIsTerm . addTerm . (unnest =<<)
+  where
+    -- dummy terminator for counting purposes
+    addTerm = appendIfLast wasmIsTerm (S.Br 0)
+
+    -- dummy terminator so we count the current block
+    unnest (S.If _ b1 b2) = S.Return : addTerm b1 ++ addTerm b2 >>= unnest
+    unnest (S.Block _ l)  = S.Return : addTerm l >>= unnest
+    unnest t              = pure t
+
 -- compiles one WASM function into an LLVM function.
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalFuncGen funcGen initFuncST
   where
-    initFuncST = FuncST [] 0 M.empty M.empty M.empty
+    initFuncST = FuncST [] 0 0 [] M.empty M.empty M.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
-    llvmObjs   = compileInstr <$> Language.Wasm.Structure.body func
     -- split the list of `LLVMObj` into blocks by looking for terminators. The
     -- terminators and the code in the corresponding blocks are then
     -- separated into an 'association list.'
     -- FIXME: splitAfter is not good enough since some blocks are nested under
     -- `if` in WASM (and possibly other instructions). These need to be
     -- un-nested into their own blocks in LLVM.
-    blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
-    namedBlks  = assignName <$> zip [0..] blks
     funcGen    = do
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
@@ -443,17 +438,36 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
             pure (makeName "local" n, t)
       modify (\st -> st { localVariableTypes = M.fromAscList localVariables })
       -- compile basic blocks and collect the results
-      basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
+      llvmInstrs   <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
+      remainingOps <- operandStack <$> get
+      let ret = do guard $ not $ L.null remainingOps
+                   pure $ packValues remainingOps
+          returnInstr = T $ AST.Do $ AST.Ret ret []
+          blks = splitAfter isTerm $ appendIfLast (not . isTerm) returnInstr llvmInstrs
+          -- `compileInstr` appends a `br` instruction at the end of blocks/ifs.
+          -- This dummy block exists to catch the fallthrough when the block/if
+          -- is at the end of the function.
+          dummyBlk = [[T $ AST.Do $ AST.Ret Nothing []]]
+          basicBlocks = fmap buildBlock
+                      $ fmap assignName
+                      $ zip [0..]
+                      $ fromMaybe (error "empty block")
+                      $ traverse unsnoc
+                      $ blks ++ dummyBlk
       pure $ Global.functionDefaults { Global.basicBlocks
                                      , Global.name
                                      , Global.returnType
                                      , Global.parameters }
 
-    -- split the last `LLVMObj` of a list of objects if it is a terminator.
-    splitTerm :: [LLVMObj] -> (Maybe LLVMTerm, [LLVMObj])
-    splitTerm []            = error "empty block"  -- this would be a bug
-    splitTerm (Term t:rest) = (Just t, L.reverse rest)
-    splitTerm instrs        = (Nothing, instrs)
+    buildBlock (name, term, instrs) = AST.BasicBlock name (unwrapI <$> instrs) (unwrapT term)
+
+    unwrapT (T t) = t
+    unwrapT instr = error $ "Not an LLVM terminator: " ++ show instr
+
+    unwrapI (I i) = i
+    unwrapI term  = error $ "Not an LLVM instruction: " ++ show term
+
+    unsnoc = fmap (second L.reverse) . L.uncons . L.reverse
 
 -- globals in the WASM sense of the term
 compileGlobals :: Natural -> S.Global -> ModGen AST.Global
@@ -473,7 +487,7 @@ compileGlobals index global = globVar
     type'      = compileType' $ S.globalType global
     exp        = compileInstr <$> S.initializer global
     init       = case compileInstr <$> S.initializer global of
-                   [Op (Const const)] -> pure const
+                   -- [Op (Const const)] -> pure const
                    -- TODO: maybe there's a way around this? The wasm specs says
                    -- the initializer should be `expr` which could really be
                    -- anything. Not sure how to implement that into LLVM though.
