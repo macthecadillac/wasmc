@@ -17,5 +17,5 @@ splitAfter f ls = filter (not . null) $ go ls []
       where
         (l1, l2) = break f l
 
-makeName :: ByteString -> Natural -> Name
-makeName s = Name . toShort . toStrict . append s . pack . show
+makeName :: String -> Natural -> Name
+makeName s = mkName . (s++) . show

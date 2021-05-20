@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
+import Control.Applicative ((<|>))
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State.Lazy
@@ -32,7 +33,9 @@ import Utils (makeName, splitAfter)
 -- a record for per-function state variables
 data FuncST = FuncST { operandStack :: [AST.Operand]
                      , currentIdentifierNumber :: Natural
-                     , localVariableTypes :: M.Map Natural Type.Type }
+                     , renameMap :: M.Map Name.Name Name.Name
+                     , localConst :: M.Map Name.Name Constant.Constant
+                     , localVariableTypes :: M.Map Name.Name Type.Type }
                      deriving (Show)
 
 data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
@@ -61,8 +64,8 @@ evalFuncGen a = evalStateT (runFuncGen a)
 data LLVMInstr = B BinOp
                | U UnOp
                | Call Natural
-               | SetLocal Natural
-               | SetGlobal Natural
+               | SetLocal Name.Name
+               | SetGlobal Name.Name
                deriving (Show)
 
 --           tag   bitsize/fp type   type  
@@ -107,8 +110,9 @@ type OOI = AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruct
 type MOI = Maybe AST.Operand -> AST.InstructionMetadata -> AST.Terminator
 
 data LLVMOp = Const     Constant.Constant
-            | GlobalRef Natural
-            | LocalRef  Natural
+            | GlobalRef Name.Name
+            | LocalRef  Name.Name
+            deriving (Show)
 
 data LLVMObj = Instr LLVMInstr
              | Op   LLVMOp
@@ -136,33 +140,27 @@ isLLVMTerm _        = False
 unwrapOp :: LLVMObj -> FuncGen AST.Operand 
 unwrapOp (Op (Const op))   = pure $ AST.ConstantOperand op
 unwrapOp (Op (LocalRef n)) = do
-  FuncST { localVariableTypes } <- get
-  let t = t M.! n
-  pure $ AST.LocalReference t $ makeName "local" n
-unwrapOp _       = error "not an operand"
+  FuncST { localVariableTypes, localConst } <- get
+  -- `<|>` is the choice operator. It tries the first branch, and if it fails,
+  -- goes on to try the second branch.
+  withMsg $ const localConst <|> ref localVariableTypes
+    where
+      ref m = AST.LocalReference <$> M.lookup n m <*> pure n
+      const m = AST.ConstantOperand <$> M.lookup n m
+      withMsg = maybe (fail $ "unbound reference: " ++ show n) pure
+unwrapOp a       = error $ "not an operand" ++ show a
 
 unwrapTerm :: LLVMObj -> LLVMTerm
 unwrapTerm (Term t) = t
 unwrapTerm _        = error "not a terminator"
-
--- compileInstr_ :: S.Instruction Natural -> FuncGen LLVMObj
--- compileInstr_ (S.IBinOp bs op) = do
---   a <- popOperand
---   b <- popOperand
---   pure $ case op of
---     S.IAdd -> iop op a b
-
--- compileBitsize :: S.BitSize -> Word32
--- compileBitsize S.BS32 = 32
--- compileBitsize S.BS64 = 64
 
 compileInstr :: S.Instruction Natural -> LLVMObj
 compileInstr (S.I32Const n)  = Op $ Const $ Constant.Int 32 $ fromIntegral n
 compileInstr (S.I64Const n)  = Op $ Const $ Constant.Int 64 $ fromIntegral n
 compileInstr (S.F32Const n)  = Op $ Const $ Constant.Float $ Float.Single n
 compileInstr (S.F64Const n)  = Op $ Const $ Constant.Float $ Float.Double n
-compileInstr (S.GetGlobal n) = Op $ GlobalRef n
-compileInstr (S.GetLocal n)  = Op $ LocalRef n
+compileInstr (S.GetGlobal n) = Op $ GlobalRef $ makeName "global" n
+compileInstr (S.GetLocal n)  = Op $ LocalRef $ makeName "local" n
 
 -- Binary Operations(IBinOPs)
 -- TODO: should use helper functions instead of explicitly matching the bitsize
@@ -214,8 +212,8 @@ compileInstr (S.IRelOp S.BS64 S.IGeS) = Instr $ B $ OOI 64 $ AST.ICmp Pred.SGE
 -- FUn Operations(FUnOPs) FAbs	 FNeg	 FCeil	 FFloor	 FTrunc	 FNearest	 FSqrt
 --compileInstr (S.FUnOp _ S.FAbs) = Instr $ IOOI Abs
 
-compileInstr (S.SetGlobal n)          = Instr $ SetGlobal n
-compileInstr (S.SetLocal n)           = Instr $ SetLocal n
+compileInstr (S.SetGlobal n)          = Instr $ SetGlobal $ makeName "global" n
+compileInstr (S.SetLocal n)           = Instr $ SetLocal  $ makeName "local" n
 compileInstr (S.Call i)               = Instr $ Call $ fromIntegral i
 
 -- Terminators (return, br etc)
@@ -239,7 +237,7 @@ compileFunctionType :: S.FuncType -> FunctionType
 compileFunctionType S.FuncType { S.params, S.results } = FT arguments returnType
   where
     arguments  = compileType <$> params
-    returnType = Type.StructureType False $ compileType <$> results
+    returnType = compileRetTypeList results
 
 -- this builds a basic block. A basic block is a single-entry-single-exit block
 -- of code. Here it means it is a block of code that has an identifier and a
@@ -247,7 +245,7 @@ compileFunctionType S.FuncType { S.params, S.results } = FT arguments returnType
 -- `llvmObjs` here is a list of `LLVMObj` that fits within one basic block--that
 -- is to say it must not contain terminators. The single terminator is
 -- separately passed in to the function.
-buildBasicBlock :: Name.Name -> LLVMTerm -> [LLVMObj] -> FuncGen Global.BasicBlock
+buildBasicBlock :: Name.Name -> Maybe LLVMTerm -> [LLVMObj] -> FuncGen Global.BasicBlock
 buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> makeTerminator term
   where
     -- we define a chunk as a block of code that ends with an LLVM instruction.
@@ -257,24 +255,37 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     -- we consume the chunks by munching them one at a time, collecting the
     -- result with `traverse` which 'magically' handles the `ModGen` monad, and
     -- concatenating the results into a list of LLVM instructions.
-    llvmInstrs = L.concat <$> traverse munch chunks
+    llvmInstrs = renameLocals =<< L.concat <$> traverse munch chunks
 
     -- For `return`s, WASM always returns whatever is left on the stack at the
     -- time of its invocation, whereas LLVM is very explicit about what to
     -- return when `ret` is called, so we need to gather what is on the
     -- `operandStack` and feed them to `AST.Ret`.
     -- TODO: we will need to expand this when we implement more terminators
-    makeTerminator :: LLVMTerm -> FuncGen (AST.Named AST.Terminator)
-    makeTerminator Ret = do
-      retVal <- stackToRetVal . operandStack <$> get
-      modify (\env -> env { operandStack = [] })
-      pure $ AST.Do $ AST.Ret (Just retVal) []
-    makeTerminator (Br i) = pure $ AST.Do $ AST.Br (makeName "block" i) []
-    makeTerminator _ = error "not implemented"
+    makeTerminator :: Maybe LLVMTerm -> FuncGen (AST.Named AST.Terminator)
+    makeTerminator Nothing       = returnOperandStackItems
+    makeTerminator (Just Ret)    = returnOperandStackItems
+    makeTerminator (Just (Br i)) = pure $ AST.Do $ AST.Br (makeName "block" i) []
+    makeTerminator _             = error "not implemented"
 
-    stackToRetVal []  = AST.LocalReference Type.VoidType "void"
-    stackToRetVal [x] = x
-    stackToRetVal l   = error "add support for multiple return vals"  -- TODO: support multiple return values
+    returnOperandStackItems = do
+      FuncST { operandStack } <- get
+      let ret = do guard $ not $ L.null operandStack
+                   pure $ packValues operandStack
+      modify (\env -> env { operandStack = [] })
+      pure $ AST.Do $ AST.Ret ret []
+
+    packValues []  = AST.LocalReference Type.VoidType "void"
+    packValues [x] = x
+    packValues l   = error "add support for multiple return vals"  -- TODO: support multiple return values
+
+    -- rename identifiers according to the rename map built during `munch`.
+    renameLocals :: [AST.Named AST.Instruction] -> FuncGen [AST.Named AST.Instruction]
+    renameLocals l = do
+      FuncST { renameMap } <- get
+      pure $ rename renameMap <$> l
+      where
+        rename map ((AST.:=) name instr) = (fromMaybe name $ M.lookup name map) AST.:= instr
 
     -- This takes a 'chunk' of the block and turns it into a single LLVM
     -- instruction.
@@ -291,18 +302,29 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
           -- merge the explicitly provided operands in the current chunk with
           -- the `operandStack` then peel off just the right amount of operands
           -- for the current instruction
-          pushOperands rest
+          pushOperands =<< traverse unwrapOp rest
           a          <- popOperand
           b          <- popOperand
           -- generate a new identifier for the intermediate result. In LLVM IR
           -- this amounts to saving the results to a 'variable.'
           identifier <- identify $ B op
           pure [identifier AST.:= buildBinOp op a b]
-        -- munchBackwards (Instr (SetLocal n):rest) = do
-        --   pushOperands rest
-        --   a <- popOperand
+        -- for local.set instructions, we only have to change previously
+        -- assigned identifiers to the one corresponding to the target index.
+        -- We'll need to do that after the entire block is built.
+        munchBackwards (Instr (SetLocal n):rest) = do
+          pushOperands =<< traverse unwrapOp rest
+          -- if there is a constant associated to the variable, remove it
+          unassignConstant n
+          a <- popOperand
+          case a of
+            -- for references, this is acieved by renaming identifiers at the
+            -- end
+            (AST.LocalReference _ name) -> addRenameAction name n *> pure []
+            (AST.ConstantOperand const) -> assignConstant n const *> pure []
+            _                           -> error "unsupported operand"
         munchBackwards (Instr (Call i):rest) = do
-          pushOperands rest
+          pushOperands =<< traverse unwrapOp rest
           ModEnv { functionTypes } <- ask
           let FT { arguments, returnType } = functionTypes M.! i
               nArgs                        = L.length $ arguments
@@ -324,8 +346,24 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
             -- last chunk in the basic block and will be returned. Put them on
             -- the `operandStack` and the `buildBasicBlock` function will deal
             -- with the rest.
-          | all isLLVMOp l = pushOperands l *> pure []
+          | all isLLVMOp l = traverse unwrapOp l >>= pushOperands >> pure []
           | otherwise      = error $ "AST.Instruction sequence not implemented: " ++ show l -- FIXME: complete me!!
+
+    -- seriously, consider using lens
+    unassignConstant :: Name.Name -> FuncGen ()
+    unassignConstant name = do
+      st@FuncST { localConst } <- get
+      put $ st { localConst = M.delete name localConst }
+
+    assignConstant :: Name.Name -> Constant.Constant -> FuncGen ()
+    assignConstant name const = do
+      st@FuncST { localConst } <- get
+      put $ st { localConst = M.insert name const localConst }
+
+    addRenameAction :: Name.Name -> Name.Name -> FuncGen ()
+    addRenameAction name newName = do
+      st@FuncST { renameMap } <- get
+      put $ st { renameMap = M.insert name newName renameMap }
 
     -- pop operand off the `operandStack`
     popOperand :: FuncGen AST.Operand
@@ -335,12 +373,10 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
       modify (\env -> env { operandStack = rest })
       pure operand
 
-    pushOperand :: LLVMObj -> FuncGen ()
-    pushOperand a
-      | isLLVMOp a = modify (\env -> env { operandStack = unwrapOp a : operandStack env })
-      | otherwise  = error $ "Not an operand: " ++ show a
+    pushOperand :: AST.Operand -> FuncGen ()
+    pushOperand op = modify (\env -> env { operandStack = op : operandStack env })
 
-    pushOperands :: [LLVMObj] -> FuncGen ()
+    pushOperands :: [AST.Operand] -> FuncGen ()
     pushOperands = sequence_ . fmap pushOperand
 
     buildBinOp :: BinOp -> AST.Operand -> AST.Operand -> AST.Instruction
@@ -357,9 +393,10 @@ buildBasicBlock name term llvmObjs = Global.BasicBlock name <$> llvmInstrs <*> m
     -- create a new identifier, put the identifier on the `operandStack` and
     -- increment the global identifier tracker
     newIdentifier :: Type.Type -> FuncGen Name.Name
-    newIdentifier idType = do
+    newIdentifier Type.VoidType = pure $ Name.mkName "void"
+    newIdentifier idType        = do
       FuncST { currentIdentifierNumber, operandStack } <- get
-      let name       = makeName "local" $ currentIdentifierNumber + 1
+      let name       = makeName "tmp" $ currentIdentifierNumber
           identifier = AST.LocalReference idType name
       modify (\env -> env {
           currentIdentifierNumber = currentIdentifierNumber + 1,
@@ -376,7 +413,7 @@ compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalFuncGen funcGen initFuncST
   where
-    initFuncST = FuncST [] 0 $ M.fromAscList $ zip [0..] localTypes
+    initFuncST = FuncST [] 0 M.empty M.empty M.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     llvmObjs   = compileInstr <$> Language.Wasm.Structure.body func
@@ -386,21 +423,25 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     -- FIXME: splitAfter is not good enough since some blocks are nested under
     -- `if` in WASM (and possibly other instructions). These need to be
     -- un-nested into their own blocks in LLVM.
-    localTypes = compileType <$> S.localTypes func :: [Type.Type]
     blks       = splitTerm <$> splitAfter isLLVMTerm llvmObjs  -- FIXME: questionable criteria here
     namedBlks  = assignName <$> zip [0..] blks
     funcGen    = do
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
       let FT { arguments, returnType } = functionTypes M.! (S.funcType func)
-      paramList <- buildParamList arguments
-      let parameters = (paramList, False)
+          paramList  = do
+            (i, t) <- zip [0..] arguments
+            pure $ Global.Parameter t (makeName "local" i) []
+          parameters = (paramList, False)
           -- if indx == startIndex then "main" else "func{indx}". All the extra code
           -- handle the fact that startIndex may or may not have a value
           name = maybe (makeName "func" indx) (const "main")
             $ guard . (==indx) =<< startFunctionIndex
-      -- the starting `currentIdentifierNumber` should be the number of parameters
-      modify (\env -> env { currentIdentifierNumber = fromIntegral $ L.length paramList })
+          localTypes = compileType <$> S.localTypes func
+          localVariables = do
+            (n, t) <- zip [0..] $ arguments ++ localTypes
+            pure (makeName "local" n, t)
+      modify (\st -> st { localVariableTypes = M.fromAscList localVariables })
       -- compile basic blocks and collect the results
       basicBlocks <- traverse (\(n, t, o) -> buildBasicBlock n t o) namedBlks
       pure $ Global.functionDefaults { Global.basicBlocks
@@ -408,24 +449,11 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
                                      , Global.returnType
                                      , Global.parameters }
 
-    buildParamList :: [Type.Type] -> FuncGen [Global.Parameter]
-    buildParamList l = do
-      let nargs = fromIntegral $ L.length l
-      env@FuncST { currentIdentifierNumber } <- get
-      put $ env { currentIdentifierNumber = currentIdentifierNumber + nargs }
-      pure [Global.Parameter t (makeName "local" i) [] | (i, t) <- zip [0..] l]
-
-    -- split the last `LLVMObj` of a list of objects if it is a terminator. If
-    -- it isn't a terminator, this is the last instruction of the WASM function
-    -- and there is an implicit return.
-    -- FIXME: the implicit return assumption is incorrect--a block could be a
-    -- result of an `if` branch, and if that is the case, at the end of the
-    -- block, we need to `br` back to the original line + 1 and continue
-    -- executing the next instruction instead of calling `ret`.
-    splitTerm :: [LLVMObj] -> (LLVMTerm, [LLVMObj])
+    -- split the last `LLVMObj` of a list of objects if it is a terminator.
+    splitTerm :: [LLVMObj] -> (Maybe LLVMTerm, [LLVMObj])
     splitTerm []            = error "empty block"  -- this would be a bug
-    splitTerm (Term t:rest) = (t, L.reverse rest)
-    splitTerm instrs        = (Ret, instrs)
+    splitTerm (Term t:rest) = (Just t, L.reverse rest)
+    splitTerm instrs        = (Nothing, instrs)
 
 -- globals in the WASM sense of the term
 compileGlobals :: Natural -> S.Global -> ModGen AST.Global
@@ -449,7 +477,7 @@ compileGlobals index global = globVar
                    -- TODO: maybe there's a way around this? The wasm specs says
                    -- the initializer should be `expr` which could really be
                    -- anything. Not sure how to implement that into LLVM though.
-                   _                                -> fail "initializer not constant"
+                   _                  -> fail "initializer not constant"
 
     isConst (S.Const _) = True
     isConst _           = False
