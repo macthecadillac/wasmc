@@ -149,6 +149,36 @@ compilefMinMax bs pred = do
   pure $ operand ++ instr
 
 compileInstr :: S.Instruction Natural -> FuncGen [LLVMInstr]
+compileInstr S.Unreachable          = undefined
+compileInstr S.Nop                  = pure []
+
+compileInstr (S.IUnOp bs S.IClz)    = undefined
+compileInstr (S.IUnOp bs S.ICtz)    = undefined
+compileInstr (S.IUnOp bs S.IPopcnt) = undefined
+
+compileInstr (S.FUnOp bs S.FAbs)     = undefined
+compileInstr (S.FUnOp bs S.FNeg)     = undefined
+compileInstr (S.FUnOp bs S.FCeil)    = undefined
+compileInstr (S.FUnOp bs S.FFloor)   = undefined
+compileInstr (S.FUnOp bs S.FTrunc)   = undefined
+compileInstr (S.FUnOp bs S.FNearest) = undefined
+compileInstr (S.FUnOp bs S.FSqrt)    = undefined
+
+compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) *> compileInstr (S.IRelOp S.BS32 S.IEq)
+compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) *> compileInstr (S.IRelOp S.BS64 S.IEq)
+
+compileInstr S.I32WrapI64            = undefined
+compileInstr S.I64ExtendSI32         = undefined
+compileInstr S.I64ExtendUI32         = undefined
+compileInstr (S.ITruncFU bs1 bs2)    = undefined
+compileInstr (S.ITruncFS bs1 bs2)    = undefined
+compileInstr (S.FConvertIU bs1 bs2)  = undefined
+compileInstr (S.FConvertIS bs1 bs2)  = undefined
+compileInstr S.F32DemoteF64          = undefined
+compileInstr S.F64PromoteF32         = undefined
+compileInstr (S.IReinterpretF bs)    = undefined
+compileInstr (S.FReinterpretI bs)    = undefined
+
 compileInstr (S.IBinOp bs S.IAdd)  = compileBinOp bbooi AST.Add  $ Type.IntegerType $ iBitSize bs
 compileInstr (S.IBinOp bs S.ISub)  = compileBinOp bbooi AST.Sub  $ Type.IntegerType $ iBitSize bs
 compileInstr (S.IBinOp bs S.IMul)  = compileBinOp bbooi AST.Mul  $ Type.IntegerType $ iBitSize bs
@@ -199,6 +229,7 @@ compileInstr (S.F32Const n)        = compileConst $ Constant.Float $ Float.Singl
 compileInstr (S.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
 
 compileInstr (S.SetGlobal n)       = error "not implemented: SetGlobal"
+compileInstr (S.TeeLocal n)       = error "not implemented: TeeLocal"
 compileInstr (S.SetLocal n)        = do
   -- if there is a constant associated to the variable, remove it
   let ident = makeName "local" n
