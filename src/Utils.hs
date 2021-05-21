@@ -8,6 +8,13 @@ import Data.Tuple (swap)
 import LLVM.AST.Name
 import Numeric.Natural
 
+appendIfLast :: (a -> Bool) -> a -> [a] -> [a]
+appendIfLast f a = reverse . aux . reverse
+  where
+    aux []       = []
+    aux l@(x:_) | f x       = a : l
+                | otherwise = l
+
 splitAfter :: (a -> Bool) -> [a] -> [[a]]
 splitAfter f ls = filter (not . null) $ go ls []
   where

@@ -26,6 +26,8 @@ dependencies:
 - mtl
 - binary
 - containers
+- QuickCheck
+- generic-random
 - llvm-hs-pure
 - llvm-hs-pretty
 - text

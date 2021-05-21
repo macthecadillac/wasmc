@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 8826feeecc579c3cf1a04ab17379db001b2074862546ad97a68a83b7f365f493
+-- hash: 2b9e556a79d3aaed567b064a9fbc95ebca1272a13641b96389d5bc2bb243eed2
 
 name:           wasmc
 version:        0.1.0.0
@@ -34,10 +34,12 @@ library
   hs-source-dirs:
       src
   build-depends:
-      base >=4.7 && <5
+      QuickCheck
+    , base >=4.7 && <5
     , binary
     , bytestring >=0.10.8
     , containers
+    , generic-random
     , llvm-hs-pretty
     , llvm-hs-pure
     , mtl
@@ -53,10 +55,12 @@ executable wasmc-exe
       app
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      base >=4.7 && <5
+      QuickCheck
+    , base >=4.7 && <5
     , binary
     , bytestring >=0.10.8
     , containers
+    , generic-random
     , llvm-hs-pretty
     , llvm-hs-pure
     , mtl
@@ -74,10 +78,12 @@ test-suite wasmc-test
       test
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      base >=4.7 && <5
+      QuickCheck
+    , base >=4.7 && <5
     , binary
     , bytestring >=0.10.8
     , containers
+    , generic-random
     , llvm-hs-pretty
     , llvm-hs-pure
     , mtl

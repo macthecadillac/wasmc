@@ -30,7 +30,7 @@ import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
 
 import Numeric.Natural
-import Utils (makeName, splitAfter)
+import Utils (appendIfLast, makeName, splitAfter)
 
 -- a record for per-function state variables
 data FuncST = FuncST { operandStack :: [AST.Operand]
@@ -75,7 +75,7 @@ type MOI    = Maybe AST.Operand -> AST.InstructionMetadata -> AST.Terminator
 
 type UnOpBuilder a = a -> AST.Operand -> AST.Instruction
 type BinOpBuilder a = a -> AST.Operand -> AST.Operand -> AST.Instruction
-type CmpBuilder a p = a -> p -> AST.Operand -> AST.Operand -> AST.Instruction
+type CmpBuilder p = POOI p -> p -> AST.Operand -> AST.Operand -> AST.Instruction
 
 boi :: UnOpBuilder BOI
 boi op a = op False a []
@@ -92,7 +92,7 @@ fooi op a b = op AST.noFastMathFlags a b []
 ooi :: BinOpBuilder OOI
 ooi op a b = op a b []
 
-pooi :: CmpBuilder (POOI p) p
+pooi :: CmpBuilder p
 pooi p pred a b = p pred a b []
 
 data LLVMInstr = I (AST.Named AST.Instruction)
@@ -311,20 +311,21 @@ compileInstr (S.Block _ body) = do
   blockIndx <- blockIdentifier <$> get
   modify (\st -> st { blockIdentifier = blockIndx + 1 })
   let numberOfBlocks = countBlocks body
-      name           = makeName "block" (blockIndx + numberOfBlocks + 1)
+      name           = makeName "block" (blockIndx + numberOfBlocks)
       term           = T $ AST.Do $ AST.Br name []
       appendTerm     = appendIfLast (not . isTerm) term
-  pushScope name
+  push name
   compiled <- fmap concat $ traverse compileInstr body
-  popScope
-  pure $ appendTerm compiled
+  pop
+  pure $ appendTerm (trace (show compiled) compiled)
     where
-      popScope = do
+      pop = do
         scopeStack <- blockScopeStack <$> get
-        (_, tail) <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
+        (_, tail)  <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
         modify (\st -> st { blockScopeStack = tail })
-      pushScope :: Name.Name -> FuncGen ()
-      pushScope s = modify (\st -> st { blockScopeStack = s : blockScopeStack st })
+
+      push :: Name.Name -> FuncGen ()
+      push s = modify (\st -> st { blockScopeStack = s : blockScopeStack st })
 
 compileInstr instr = error $ "not implemented: " ++ show instr
 
@@ -420,23 +421,14 @@ wasmIsTerm (S.BrIf _)    = True
 wasmIsTerm (S.Block _ _) = True
 wasmIsTerm _             = False
 
-appendIfLast :: (a -> Bool) -> a -> [a] -> [a]
-appendIfLast f a = L.reverse . aux . L.reverse
-  where
-    aux []       = []
-    aux l@(x:xs) | f x       = a : l
-                 | otherwise = l
-
 countBlocks :: [S.Instruction Natural] -> Natural
-countBlocks = fromIntegral . L.length . L.filter wasmIsTerm . addTerm . (unnest =<<)
+countBlocks = sum . fmap aux
   where
-    -- dummy terminator for counting purposes
-    addTerm = appendIfLast wasmIsTerm (S.Br 0)
-
-    -- dummy terminator so we count the current block
-    unnest (S.If _ b1 b2) = S.Return : addTerm b1 ++ addTerm b2 >>= unnest
-    unnest (S.Block _ l)  = S.Return : addTerm l >>= unnest
-    unnest t              = pure t
+    aux (S.If _ b1 b2) = 3 + countBlocks b1 + countBlocks b2
+    aux (S.Block _ l)  = 1 + countBlocks l
+    aux (S.Br _)       = 1
+    aux (S.BrIf _)     = 1
+    aux _              = 0
 
 -- compiles one WASM function into an LLVM function.
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
