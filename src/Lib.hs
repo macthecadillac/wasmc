@@ -3,16 +3,20 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
-import Control.Applicative ((<|>))
+import Control.Applicative ((<|>), Alternative)
 import Control.Monad.Except
+import qualified Control.Monad.Fail as F
 import Control.Monad.Reader
+    ( runReader, MonadReader(ask), Reader, ReaderT(ReaderT) )
 import Control.Monad.State.Lazy
 import Data.Bifunctor
 import qualified Data.ByteString.Lazy as B
+import Data.Functor
 import qualified Data.Map as M
 import qualified Data.List as L
 import Data.Maybe
 import Data.Word
+import Data.Tuple
 import Debug.Trace
 
 import qualified Language.Wasm as Wasm
@@ -30,7 +34,7 @@ import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
 
 import Numeric.Natural
-import Utils (appendIfLast, makeName, splitAfter)
+import Utils (appendIfLast, makeName, splitAfter, unsnoc)
 
 -- a record for per-function state variables
 data FuncST = FuncST { operandStack :: [AST.Operand]
@@ -38,7 +42,7 @@ data FuncST = FuncST { operandStack :: [AST.Operand]
                      , blockIdentifier :: Natural
                      , blockScopeStack :: [Name.Name]
                      , renameMap :: M.Map Name.Name Name.Name
-                     , localConst :: M.Map Name.Name Constant.Constant
+                     , localConst :: M.Map Name.Name (M.Map Name.Name Constant.Constant)  -- the constants associated with the identifier of the incoming block
                      , localVariableTypes :: M.Map Name.Name Type.Type }
                      deriving (Show)
 
@@ -53,10 +57,13 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      deriving (Show)
 
 newtype ModGen a = ModGen { runModGen :: ExceptT String (Reader ModEnv) a }
-  deriving (Functor, Applicative, Monad, MonadReader ModEnv)
+  deriving (Functor, Applicative, MonadPlus, Alternative, Monad, MonadReader ModEnv, MonadError String)
 
 newtype FuncGen a = FuncGen { runFuncGen :: StateT FuncST ModGen a }
-  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadState FuncST)
+  deriving (Functor, Applicative, MonadPlus, Alternative, Monad, MonadReader ModEnv, F.MonadFail, MonadError String, MonadState FuncST)
+
+instance F.MonadFail ModGen where
+  fail = liftEither . Left
 
 -- helper functions. Not entirely following Haskell conventions here.
 evalModGen :: ModGen a -> ModEnv -> Either String a
@@ -104,7 +111,7 @@ isTerm (T _) = True
 isTerm _     = False
 
 compileConst :: Constant.Constant -> FuncGen [LLVMInstr]
-compileConst const = (pushOperand $ AST.ConstantOperand const) *> pure []
+compileConst const = (pushOperand $ AST.ConstantOperand const) $> []
 
 compileBinOp :: BinOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
 compileBinOp builder op t = do
@@ -112,21 +119,21 @@ compileBinOp builder op t = do
   a          <- popOperand
   -- generate a new identifier for the intermediate result. In LLVM IR
   -- this amounts to saving the results to a 'variable.'
-  identifier <- newLocalIdentifier t
-  pure [I $ identifier AST.:= builder op a b]
+  constructor <- newInstructionConstructor t
+  pure [I $ constructor $ builder op a b]
 
 compileUnOp :: UnOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
 compileUnOp builder op t = do
   a          <- popOperand
-  identifier <- newLocalIdentifier t
-  pure [I $ identifier AST.:= builder op a]
+  constructor <- newInstructionConstructor t
+  pure [I $ constructor $ builder op a]
 
 compileCmpOp :: POOI p -> p -> Word32 -> FuncGen [LLVMInstr]
 compileCmpOp cmp pred bs = do
   b          <- popOperand
   a          <- popOperand
-  identifier <- newLocalIdentifier $ Type.IntegerType bs
-  pure [I $ identifier AST.:= pooi cmp pred a b]
+  constructor <- newInstructionConstructor $ Type.IntegerType bs
+  pure [I $ constructor $ pooi cmp pred a b]
 
 iBitSize :: S.BitSize -> Word32
 iBitSize S.BS32 = 32
@@ -157,7 +164,8 @@ compileInstr (S.IUnOp bs S.ICtz)    = undefined
 compileInstr (S.IUnOp bs S.IPopcnt) = undefined
 
 compileInstr (S.FUnOp bs S.FAbs)     = undefined
-compileInstr (S.FUnOp bs S.FNeg)     = undefined
+compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) *> compileInstr (S.FBinOp S.BS32 S.FMul)
+compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) *> compileInstr (S.FBinOp S.BS64 S.FMul)
 compileInstr (S.FUnOp bs S.FCeil)    = undefined
 compileInstr (S.FUnOp bs S.FFloor)   = undefined
 compileInstr (S.FUnOp bs S.FTrunc)   = undefined
@@ -220,8 +228,8 @@ compileInstr S.Select              = do
   cond       <- popOperand
   false      <- popOperand
   true       <- popOperand
-  identifier <- newLocalIdentifier $ operandType true
-  pure [I $ identifier AST.:= AST.Select cond true false []]
+  constructor <- newInstructionConstructor $ operandType true
+  pure [I $ constructor $ AST.Select cond true false []]
 
 compileInstr (S.I32Const n)        = compileConst $ Constant.Int 32 $ fromIntegral n
 compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegral n
@@ -229,7 +237,7 @@ compileInstr (S.F32Const n)        = compileConst $ Constant.Float $ Float.Singl
 compileInstr (S.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
 
 compileInstr (S.SetGlobal n)       = error "not implemented: SetGlobal"
-compileInstr (S.TeeLocal n)       = error "not implemented: TeeLocal"
+compileInstr (S.TeeLocal n)        = error "not implemented: TeeLocal"
 compileInstr (S.SetLocal n)        = do
   -- if there is a constant associated to the variable, remove it
   let ident = makeName "local" n
@@ -238,23 +246,36 @@ compileInstr (S.SetLocal n)        = do
   case a of
     -- for references, this is acieved by renaming identifiers at the
     -- end
-    (AST.LocalReference _ name) -> addRenameAction name ident *> pure []
-    (AST.ConstantOperand const) -> assignConstant ident const *> pure []
+    (AST.LocalReference _ name) -> addRenameAction name ident $> []
+    (AST.ConstantOperand const) -> assignConstant ident const $> []
     _                           -> error "unsupported operand"
 
 compileInstr (S.GetGlobal n)       = error "not implemented: GetGlobal"
-compileInstr (S.GetLocal n)        = do
-  FuncST { localVariableTypes, localConst } <- get
-  -- `<|>` is the choice operator. It tries the first branch, and if it fails,
-  -- goes on to try the second branch.
-  operand <- withMsg $ const localConst <|> ref localVariableTypes
-  pushOperand operand
-  pure []
+
+-- `<|>` is the choice operator. It tries the first branch, and if it fails,
+-- goes on to try the second branch.
+compileInstr (S.GetLocal n)        = const <|> ref
     where
       name = makeName "local" n
-      ref m = AST.LocalReference <$> M.lookup name m <*> pure name
-      const m = AST.ConstantOperand <$> M.lookup name m
-      withMsg = maybe (fail $ "unbound reference: " ++ show name) pure
+      withMsg = maybe (F.fail $ "unbound reference: " ++ show name) pure
+      ref = do
+        FuncST { localVariableTypes } <- get
+        operand <- withMsg $ AST.LocalReference <$> M.lookup name localVariableTypes <*> pure name
+        pushOperand operand
+        pure []
+      const = do
+        FuncST { localVariableTypes, localConst, blockIdentifier } <- get
+        varType     <- withMsg $ M.lookup name localVariableTypes
+        constants   <- withMsg $ M.lookup name localConst
+        constructor <- newInstructionConstructor varType
+        let outofblockInstr = do
+                pure $ pure
+                     $ I
+                     $ constructor
+                     $ AST.Phi varType (first AST.ConstantOperand . swap <$> M.assocs constants) []
+            inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
+            blockID         = makeName "block" blockIdentifier
+        maybe outofblockInstr inblockInstr $ M.lookup blockID constants
 
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
@@ -271,8 +292,8 @@ compileInstr (S.Call i) = do
   args       <- replicateM nArgs popOperand
   let arguments = [(operand, []) | operand <- args]
       instr     = AST.Call Nothing Conv.C [] function arguments [] []
-  identifier <- newLocalIdentifier returnType
-  pure [I $ identifier AST.:= instr]
+  constructor <- newInstructionConstructor returnType
+  pure [I $ constructor instr]
 
 -- TODO: will need to be modified for multiple returns. Think about the
 -- difference branches and residual items on the stack before entering each
@@ -290,8 +311,8 @@ compileInstr (S.If _ b1 b2) = do
       term        = T $ AST.Do $ AST.Br fallthrough []
       appendTerm  = appendIfLast (not . isTerm) term
   operand    <- popOperand
-  b1Compiled <- fmap concat $ traverse compileInstr b1
-  b2Compiled <- fmap concat $ traverse compileInstr b2
+  b1Compiled <- concat <$> traverse compileInstr b1
+  b2Compiled <- concat <$> traverse compileInstr b2
   let instr = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
   pure $ instr : appendTerm b1Compiled ++ appendTerm b2Compiled
 
@@ -315,9 +336,10 @@ compileInstr (S.Block _ body) = do
       term           = T $ AST.Do $ AST.Br name []
       appendTerm     = appendIfLast (not . isTerm) term
   push name
-  compiled <- fmap concat $ traverse compileInstr body
+  compiled <- concat <$> traverse compileInstr body
   pop
-  pure $ appendTerm (trace (show compiled) compiled)
+  pure $ appendTerm compiled
+  -- pure compiled
     where
       pop = do
         scopeStack <- blockScopeStack <$> get
@@ -348,12 +370,20 @@ compileFunctionType S.FuncType { S.params, S.results } = FT arguments returnType
 
 -- seriously, consider using lens
 unassignConstant :: Name.Name -> FuncGen ()
-unassignConstant name =
-  modify (\st -> st { localConst = M.delete name $ localConst st })
+unassignConstant name = do
+  st@FuncST { blockIdentifier, localConst } <- get
+  let blockID    = makeName "block" blockIdentifier
+      f (Just m) = Just $ M.delete blockID m
+      f Nothing  = Nothing
+  put $ st { localConst = M.alter f name localConst }
 
 assignConstant :: Name.Name -> Constant.Constant -> FuncGen ()
-assignConstant name const =
-  modify (\st -> st { localConst = M.insert name const $ localConst st })
+assignConstant name const = do
+  st@FuncST { blockIdentifier, localConst } <- get
+  let blockID    = makeName "block" blockIdentifier
+      f (Just m) = Just $ M.insert blockID const m
+      f Nothing  = Just $ M.singleton blockID const
+  put $ st { localConst = M.alter f name localConst }
 
 addRenameAction :: Name.Name -> Name.Name -> FuncGen ()
 addRenameAction name newName =
@@ -363,7 +393,7 @@ addRenameAction name newName =
 popOperand :: FuncGen AST.Operand
 popOperand = do
   stack           <- operandStack <$> get
-  (operand, rest) <- maybe (fail "not enough operands") pure $ L.uncons stack
+  (operand, rest) <- maybe (F.fail "not enough operands") pure $ L.uncons stack
   modify (\st -> st { operandStack = rest })
   pure operand
 
@@ -371,7 +401,7 @@ pushOperand :: AST.Operand -> FuncGen ()
 pushOperand op = modify (\st -> st { operandStack = op : operandStack st })
 
 pushOperands :: [AST.Operand] -> FuncGen ()
-pushOperands = sequence_ . fmap pushOperand
+pushOperands = mapM_ pushOperand
 
 operandType :: AST.Operand -> Type.Type
 operandType (AST.LocalReference t _) = t
@@ -382,17 +412,17 @@ operandType t = error $ "Not a recognized type: " ++ show t
 
 -- create a new identifier, put the identifier on the `operandStack` and
 -- increment the global identifier tracker
-newLocalIdentifier :: Type.Type -> FuncGen Name.Name
-newLocalIdentifier Type.VoidType = pure $ Name.mkName "void"
-newLocalIdentifier idType        = do
+newInstructionConstructor :: Type.Type -> FuncGen (AST.Instruction -> AST.Named AST.Instruction)
+newInstructionConstructor Type.VoidType = pure AST.Do
+newInstructionConstructor idType        = do
   FuncST { localIdentifier, operandStack } <- get
-  let name       = makeName "tmp" $ localIdentifier
+  let name       = makeName "tmp" localIdentifier
       identifier = AST.LocalReference idType name
   modify (\env -> env {
       localIdentifier = localIdentifier + 1,
       operandStack = identifier : operandStack
     })
-  pure name
+  pure (name AST.:=)
 
 packValues :: [AST.Operand] -> AST.Operand
 packValues []  = AST.LocalReference Type.VoidType "void"
@@ -403,7 +433,7 @@ returnOperandStackItems :: FuncGen (AST.Named AST.Terminator)
 returnOperandStackItems = do
   FuncST { operandStack } <- get
   let ret = do guard $ not $ L.null operandStack
-               pure $ packValues operandStack
+               pure $ packValues (trace (show operandStack) operandStack)
   modify (\env -> env { operandStack = [] })
   pure $ AST.Do $ AST.Ret ret []
 
@@ -431,6 +461,7 @@ countBlocks = sum . fmap aux
     aux _              = 0
 
 -- compiles one WASM function into an LLVM function.
+-- FIXME: rename assignments
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalFuncGen funcGen initFuncST
   where
@@ -463,20 +494,16 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
       -- compile basic blocks and collect the results
       llvmInstrs   <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
       remainingOps <- operandStack <$> get
-      let ret = do guard $ not $ L.null remainingOps
-                   pure $ packValues remainingOps
-          returnInstr = T $ AST.Do $ AST.Ret ret []
-          blks = splitAfter isTerm $ appendIfLast (not . isTerm) returnInstr llvmInstrs
-          -- `compileInstr` appends a `br` instruction at the end of blocks/ifs.
-          -- This dummy block exists to catch the fallthrough when the block/if
-          -- is at the end of the function.
-          dummyBlk = [[T $ AST.Do $ AST.Ret Nothing []]]
-          basicBlocks = fmap buildBlock
-                      $ fmap assignName
+      returnInstr  <- returnOperandStackItems
+      consts       <- localConst <$> get
+      let blks = splitAfter isTerm
+               $ appendIfLast (not . isRet) (T returnInstr) (trace (show consts) llvmInstrs)
+          -- TODO: conditional additional block if the last item is a block and
+          -- requested a jump to an additional block
+          basicBlocks = fmap (buildBlock . assignName)
                       $ zip [0..]
                       $ fromMaybe (error "empty block")
-                      $ traverse unsnoc
-                      $ blks ++ dummyBlk
+                      $ traverse unsnoc blks
       pure $ Global.functionDefaults { Global.basicBlocks
                                      , Global.name
                                      , Global.returnType
@@ -484,13 +511,14 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
 
     buildBlock (name, term, instrs) = AST.BasicBlock name (unwrapI <$> instrs) (unwrapT term)
 
+    isRet (T ((AST.:=) _ (AST.Ret _ _))) = True
+    isRet _                              = False
+
     unwrapT (T t) = t
     unwrapT instr = error $ "Not an LLVM terminator: " ++ show instr
 
     unwrapI (I i) = i
     unwrapI term  = error $ "Not an LLVM instruction: " ++ show term
-
-    unsnoc = fmap (second L.reverse) . L.uncons . L.reverse
 
 -- globals in the WASM sense of the term
 compileGlobals :: Natural -> S.Global -> ModGen AST.Global
@@ -510,11 +538,11 @@ compileGlobals index global = globVar
     type'      = compileType' $ S.globalType global
     exp        = compileInstr <$> S.initializer global
     init       = case compileInstr <$> S.initializer global of
-                   -- [Op (Const const)] -> pure const
+                  --  [Op (Const const)] -> pure const
                    -- TODO: maybe there's a way around this? The wasm specs says
                    -- the initializer should be `expr` which could really be
                    -- anything. Not sure how to implement that into LLVM though.
-                   _                  -> fail "initializer not constant"
+                   _                  -> F.fail "initializer not constant"
 
     isConst (S.Const _) = True
     isConst _           = False
@@ -522,7 +550,19 @@ compileGlobals index global = globVar
     compileType' (S.Const t) = compileType t
     compileType' (S.Mut   t) = compileType t
 
--- see todonotes for the eponymous
+-- AST.moduleDefinitions Module
+-- ASTElem = Type.StructureType false [Type.IntegerType, Type.FunctionType]
+
+compileTable :: Natural -> S.Table -> ModGen Global.Global
+compileTable index table = fail "rip"
+-- compileTable index table = do
+--   let instrs = [AST.Alloca (Type.NamedTypeReference "Elem") (AST.ConstantOperand 1) 8 []]
+--   pure $ Global.Global {
+--
+--   }
+
+
+
 -- TODO: tables, elems
 -- TODO: mems
 -- TODO: datas
@@ -535,13 +575,21 @@ compileModule wasmMod = evalModGen modGen initModEnv
     functionTypes      = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
     initModEnv         = ModEnv startFunctionIndex functionTypes
     wasmGlobals        = zip [0..] $ S.globals wasmMod
+    wasmTables         = zip [0..] $ S.tables wasmMod
     wasmFuncs          = zip [0..] $ S.functions wasmMod
     modGen             = do
       globals <- traverse (uncurry compileGlobals) wasmGlobals
+      -- tables  <- traverse (uncurry compileTable) wasmTables
       defs    <- traverse (uncurry compileFunction) wasmFuncs
       pure $ AST.defaultModule
         { AST.moduleName = "basic",
-          AST.moduleDefinitions = AST.GlobalDefinition <$> defs
+          AST.moduleDefinitions = 
+            (AST.GlobalDefinition <$> defs) ++
+            [
+              AST.TypeDefinition "Elem" (Just (AST.StructureType False [Type.i32, Type.ptr (Type.FunctionType Type.void [] False)]))
+            , AST.TypeDefinition "Table" (Just (AST.StructureType False [Type.ptr (Type.NamedTypeReference "Elem"), Type.i32, Type.i32]))
+            , AST.TypeDefinition "Memory" (Just (AST.StructureType False [Type.ptr Type.i8, Type.i32, Type.i32, Type.i32]))
+            ]
         }
 
 parseModule :: B.ByteString -> Either String S.Module
