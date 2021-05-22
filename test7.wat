@@ -1,6 +1,7 @@
 (module
-  (export "foo" (func $foo))
-  (func $foo
+  (start $main)
+  (export "start" (func $main))
+  (func $main
 	(loop
-	  (br 0))
+	  )
 	))

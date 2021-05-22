@@ -3,12 +3,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
-import Control.Applicative ((<|>), Alternative)
-import Control.Monad.Except
-import qualified Control.Monad.Fail as F
+import Control.Applicative ((<|>))
 import Control.Monad.Reader
-    ( runReader, MonadReader(ask), Reader, ReaderT(ReaderT) )
 import Control.Monad.State.Lazy
+import qualified Control.Monad.Fail as F
 import Data.Bifunctor
 import qualified Data.ByteString.Lazy as B
 import Data.Functor
@@ -33,44 +31,9 @@ import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
 
+import Gen
 import Numeric.Natural
 import Utils (appendIfLast, makeName, splitAfter, unsnoc)
-
--- a record for per-function state variables
-data FuncST = FuncST { operandStack :: [AST.Operand]
-                     , localIdentifier :: Natural
-                     , blockIdentifier :: Natural
-                     , blockScopeStack :: [Name.Name]
-                     , renameMap :: M.Map Name.Name Name.Name
-                     , localConst :: M.Map Name.Name (M.Map Name.Name Constant.Constant)  -- the constants associated with the identifier of the incoming block
-                     , localVariableTypes :: M.Map Name.Name Type.Type }
-                     deriving (Show)
-
-data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
-  deriving (Show)
-
--- a record for per-module constants
-data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
-                     , functionTypes :: M.Map Natural FunctionType
-                    --  , globalVariableTypes :: M.Map Natural Type.Type
-                      }
-                     deriving (Show)
-
-newtype ModGen a = ModGen { runModGen :: ExceptT String (Reader ModEnv) a }
-  deriving (Functor, Applicative, MonadPlus, Alternative, Monad, MonadReader ModEnv, MonadError String)
-
-newtype FuncGen a = FuncGen { runFuncGen :: StateT FuncST ModGen a }
-  deriving (Functor, Applicative, MonadPlus, Alternative, Monad, MonadReader ModEnv, F.MonadFail, MonadError String, MonadState FuncST)
-
-instance F.MonadFail ModGen where
-  fail = liftEither . Left
-
--- helper functions. Not entirely following Haskell conventions here.
-evalModGen :: ModGen a -> ModEnv -> Either String a
-evalModGen a = runReader (runExceptT (runModGen a))
-
-evalFuncGen :: FuncGen a -> FuncST -> ModGen a
-evalFuncGen a = evalStateT (runFuncGen a)
 
 type BOI    = Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
 type BOOI   = Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
@@ -110,6 +73,46 @@ isTerm :: LLVMInstr -> Bool
 isTerm (T _) = True
 isTerm _     = False
 
+iBitSize :: S.BitSize -> Word32
+iBitSize S.BS32 = 32
+iBitSize S.BS64 = 64
+
+fBitSize :: S.BitSize -> Type.FloatingPointType
+fBitSize S.BS32 = Type.FloatFP
+fBitSize S.BS64 = Type.DoubleFP
+
+operandType :: AST.Operand -> Type.Type
+operandType (AST.LocalReference t _) = t
+operandType (AST.ConstantOperand (Constant.Int bs _)) = Type.IntegerType bs
+operandType (AST.ConstantOperand (Constant.Float (Float.Single _))) = Type.FloatingPointType Type.FloatFP
+operandType (AST.ConstantOperand (Constant.Float (Float.Double _))) = Type.FloatingPointType Type.DoubleFP
+operandType t = error $ "Not a recognized type: " ++ show t
+
+-- check if a wasm instruction will be compiled to a terminator in LLVM
+wasmIsTerm :: S.Instruction a -> Bool
+wasmIsTerm S.Return      = True
+wasmIsTerm (S.If _ _ _)  = True
+wasmIsTerm (S.Br _)      = True
+wasmIsTerm (S.BrIf _)    = True
+wasmIsTerm (S.Block _ _) = True
+wasmIsTerm (S.Loop _ _)  = True
+wasmIsTerm _             = False
+
+countTerminals :: [S.Instruction Natural] -> Natural
+countTerminals = sum . fmap aux
+  where
+    aux (S.If _ b1 b2) = oneIfTailIsNotTerm b1 + oneIfTailIsNotTerm b2 + countTerminals b1 + countTerminals b2
+    aux (S.Block _ l)  = oneIfTailIsNotTerm l + countTerminals l
+    aux (S.Br _)       = 1
+    aux (S.BrIf _)     = 1
+    aux _              = 0
+
+    oneIfTailIsNotTerm = oneIfHead (not . wasmIsTerm) . reverse
+
+    oneIfHead _ []    = 0
+    oneIfHead g (x:_) | g x       = 1
+                      | otherwise = 0
+
 compileConst :: Constant.Constant -> FuncGen [LLVMInstr]
 compileConst const = (pushOperand $ AST.ConstantOperand const) $> []
 
@@ -135,14 +138,6 @@ compileCmpOp cmp pred bs = do
   -- comparison operators return i1 sized booleans
   constructor <- newInstructionConstructor $ Type.IntegerType 1
   pure [I $ constructor $ pooi cmp pred a b]
-
-iBitSize :: S.BitSize -> Word32
-iBitSize S.BS32 = 32
-iBitSize S.BS64 = 64
-
-fBitSize :: S.BitSize -> Type.FloatingPointType
-fBitSize S.BS32 = Type.FloatFP
-fBitSize S.BS64 = Type.DoubleFP
 
 compilefMinMax :: S.BitSize -> S.FRelOp -> FuncGen [LLVMInstr]
 compilefMinMax bs pred = do
@@ -346,31 +341,19 @@ compileInstr (S.Block _ body) = do
 -- the difference with Block is where the scope starts
 compileInstr (S.Loop _ body) = do
   blockIndx <- blockIdentifier <$> get
-  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
+  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 1) body
       numberOfBlocks = countTerminals wasmInstrs
       startOfBlock   = makeName "block" $ blockIndx + 1
       endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks + 1
       start          = T $ AST.Do $ AST.Br startOfBlock []
+  pushScope endOfBlock
   pushScope startOfBlock
   compiled <- concat <$> traverse compileInstr wasmInstrs
+  popScope
   popScope
   pure $ start : compiled
 
 compileInstr instr = error $ "not implemented: " ++ show instr
-
-popScope :: FuncGen ()
-popScope = do
-  scopeStack <- blockScopeStack <$> get
-  (_, tail)  <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
-  modify (\st -> st { blockScopeStack = tail })
-
-pushScope :: Name.Name -> FuncGen ()
-pushScope s = modify (\st -> st { blockScopeStack = s : blockScopeStack st })
-
-readScope :: Int -> FuncGen Name.Name
-readScope i = do
-  scopeStack <- blockScopeStack <$> get
-  maybe (error "Undefined scope") (pure . snd) $ L.find ((i==) . fst) $ zip [0..] scopeStack
 
 compileType :: S.ValueType -> Type.Type
 compileType S.I32 = Type.IntegerType 32
@@ -384,105 +367,10 @@ compileFunctionType S.FuncType { S.params, S.results } = FT arguments returnType
     arguments  = compileType <$> params
     returnType = compileRetTypeList results
 
--- seriously, consider using lens
-unassignConstant :: Name.Name -> FuncGen ()
-unassignConstant name = do
-  st@FuncST { blockIdentifier, localConst } <- get
-  let blockID    = makeName "block" blockIdentifier
-      f (Just m) = Just $ M.delete blockID m
-      f Nothing  = Nothing
-  put $ st { localConst = M.alter f name localConst }
-
-assignConstant :: Name.Name -> Constant.Constant -> FuncGen ()
-assignConstant name const = do
-  st@FuncST { blockIdentifier, localConst } <- get
-  let blockID    = makeName "block" blockIdentifier
-      f (Just m) = Just $ M.insert blockID const m
-      f Nothing  = Just $ M.singleton blockID const
-  put $ st { localConst = M.alter f name localConst }
-
-addRenameAction :: Name.Name -> Name.Name -> FuncGen ()
-addRenameAction name newName =
-  modify (\st -> st { renameMap = M.insert name newName $ renameMap st })
-
--- pop operand off the `operandStack`
-popOperand :: FuncGen AST.Operand
-popOperand = do
-  stack           <- operandStack <$> get
-  (operand, rest) <- maybe (F.fail "not enough operands") pure $ L.uncons stack
-  modify (\st -> st { operandStack = rest })
-  pure operand
-
-pushOperand :: AST.Operand -> FuncGen ()
-pushOperand op = modify (\st -> st { operandStack = op : operandStack st })
-
-pushOperands :: [AST.Operand] -> FuncGen ()
-pushOperands = mapM_ pushOperand
-
-incrLocalIdentifier :: FuncGen ()
-incrLocalIdentifier = modify (\st -> st { localIdentifier = localIdentifier st + 1 })
-
-operandType :: AST.Operand -> Type.Type
-operandType (AST.LocalReference t _) = t
-operandType (AST.ConstantOperand (Constant.Int bs _)) = Type.IntegerType bs
-operandType (AST.ConstantOperand (Constant.Float (Float.Single _))) = Type.FloatingPointType Type.FloatFP
-operandType (AST.ConstantOperand (Constant.Float (Float.Double _))) = Type.FloatingPointType Type.DoubleFP
-operandType t = error $ "Not a recognized type: " ++ show t
-
--- create a new identifier, put the identifier on the `operandStack` and
--- increment the global identifier tracker
-newInstructionConstructor :: Type.Type -> FuncGen (AST.Instruction -> AST.Named AST.Instruction)
-newInstructionConstructor Type.VoidType = pure AST.Do
-newInstructionConstructor idType        = do
-  FuncST { localIdentifier, operandStack } <- get
-  let name       = makeName "tmp" localIdentifier
-      identifier = AST.LocalReference idType name
-  pushOperand identifier
-  incrLocalIdentifier
-  pure (name AST.:=)
-
-packValues :: [AST.Operand] -> AST.Operand
-packValues []  = AST.LocalReference Type.VoidType "void"
-packValues [x] = x
-packValues l   = error "add support for multiple return vals"  -- TODO: support multiple return values
-
-returnOperandStackItems :: FuncGen (AST.Named AST.Terminator)
-returnOperandStackItems = do
-  FuncST { operandStack } <- get
-  let ret = do guard $ not $ L.null operandStack
-               pure $ packValues operandStack
-  modify (\env -> env { operandStack = [] })
-  pure $ AST.Do $ AST.Ret ret []
-
 compileRetTypeList :: [S.ValueType] -> Type.Type
 compileRetTypeList []  = Type.VoidType
 compileRetTypeList [t] = compileType t
 compileRetTypeList l   = Type.StructureType True $ compileType <$> l
-
--- check if a wasm instruction will be compiled to a terminator in LLVM
-wasmIsTerm :: S.Instruction a -> Bool
-wasmIsTerm S.Return      = True
-wasmIsTerm (S.If _ _ _)  = True
-wasmIsTerm (S.Br _)      = True
-wasmIsTerm (S.BrIf _)    = True
-wasmIsTerm (S.Block _ _) = True
-wasmIsTerm (S.Loop _ _)  = True
-wasmIsTerm _             = False
-
-countTerminals :: [S.Instruction Natural] -> Natural
-countTerminals = sum . fmap aux
-  where
-    aux (S.If _ b1 b2) = oneIfTailIsNotTerm b1 + oneIfTailIsNotTerm b2 + countTerminals b1 + countTerminals b2
-    aux (S.Block _ l)  = oneIfTailIsNotTerm l + countTerminals l
-    aux (S.Br _)       = 1
-    aux (S.BrIf _)     = 1
-    aux _              = 0
-
-    oneIfTailIsNotTerm = oneIfHead (not . wasmIsTerm) . reverse
-
-    oneIfHead _ []    = 0
-    oneIfHead g (x:_) | g x       = 1
-                      | otherwise = 0
 
 -- compiles one WASM function into an LLVM function.
 -- FIXME: rename assignments
