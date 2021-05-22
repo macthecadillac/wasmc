@@ -337,18 +337,24 @@ compileInstr (S.Block _ body) = do
   blockIndx <- blockIdentifier <$> get
   let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
       numberOfBlocks = countTerminals wasmInstrs
-      endOfBlock     = makeName "block" (blockIndx + numberOfBlocks)
-      term           = T $ AST.Do $ AST.Br endOfBlock []
+      endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks
   pushScope endOfBlock
   compiled <- concat <$> traverse compileInstr wasmInstrs
   popScope
   pure compiled
-    where
-      lastIsNotTerm [] = True
-      lastIsNotTerm l  = not $ isTerm $ last l
 
-      incrIf pred st | pred      = st { blockIdentifier = blockIdentifier st + 1 }
-                     | otherwise = st
+-- the difference with Block is where the scope starts
+compileInstr (S.Loop _ body) = do
+  blockIndx <- blockIdentifier <$> get
+  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
+      numberOfBlocks = countTerminals wasmInstrs
+      startOfBlock   = makeName "block" $ blockIndx + 1
+      endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks + 1
+      start          = T $ AST.Do $ AST.Br startOfBlock []
+  pushScope startOfBlock
+  compiled <- concat <$> traverse compileInstr wasmInstrs
+  popScope
+  pure $ start : compiled
 
 compileInstr instr = error $ "not implemented: " ++ show instr
 
@@ -460,6 +466,7 @@ wasmIsTerm (S.If _ _ _)  = True
 wasmIsTerm (S.Br _)      = True
 wasmIsTerm (S.BrIf _)    = True
 wasmIsTerm (S.Block _ _) = True
+wasmIsTerm (S.Loop _ _)  = True
 wasmIsTerm _             = False
 
 countTerminals :: [S.Instruction Natural] -> Natural
