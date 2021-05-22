@@ -16,6 +16,8 @@
       (local.get $x)
       (i32.add)
       (local.set $x))
+	(i32.const 2)
+	(i32.mul)
     (local.set $self)
     (; Variable declarations ;)
     (; Body ;))

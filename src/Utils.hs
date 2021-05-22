@@ -1,9 +1,11 @@
 module Utils where
 
+import Data.Bifunctor
 import Data.Binary (encode)
 import Data.ByteString.Lazy (append, toStrict, ByteString)
 import Data.ByteString.Lazy.Char8 (pack)
 import Data.ByteString.Short.Internal (ShortByteString, toShort)
+import qualified Data.List as L
 import Data.Tuple (swap)
 import LLVM.AST.Name
 import Numeric.Natural
@@ -11,7 +13,7 @@ import Numeric.Natural
 appendIfLast :: (a -> Bool) -> a -> [a] -> [a]
 appendIfLast f a = reverse . aux . reverse
   where
-    aux []       = []
+    aux []      = []
     aux l@(x:_) | f x       = a : l
                 | otherwise = l
 
@@ -26,3 +28,6 @@ splitAfter f ls = filter (not . null) $ go ls []
 
 makeName :: String -> Natural -> Name
 makeName s = mkName . (s++) . show
+
+unsnoc :: [a] -> Maybe (a, [a])
+unsnoc = fmap (second L.reverse) . L.uncons . L.reverse

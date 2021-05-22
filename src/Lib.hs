@@ -225,9 +225,9 @@ compileInstr (S.FRelOp bs S.FLe)   = compileCmpOp AST.FCmp FPred.OLE $ iBitSize 
 compileInstr (S.FRelOp bs S.FGe)   = compileCmpOp AST.FCmp FPred.OGE $ iBitSize bs
 
 compileInstr S.Select              = do
-  cond       <- popOperand
-  false      <- popOperand
-  true       <- popOperand
+  cond        <- popOperand
+  false       <- popOperand
+  true        <- popOperand
   constructor <- newInstructionConstructor $ operandType true
   pure [I $ constructor $ AST.Select cond true false []]
 
@@ -252,6 +252,7 @@ compileInstr (S.SetLocal n)        = do
 
 compileInstr (S.GetGlobal n)       = error "not implemented: GetGlobal"
 
+-- A bit dangerous, but should work since it fails before it gets to push/pop
 -- `<|>` is the choice operator. It tries the first branch, and if it fails,
 -- goes on to try the second branch.
 compileInstr (S.GetLocal n)        = const <|> ref
@@ -274,8 +275,9 @@ compileInstr (S.GetLocal n)        = const <|> ref
                      $ constructor
                      $ AST.Phi varType (first AST.ConstantOperand . swap <$> M.assocs constants) []
             inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
+            -- inblockInstr c  = pure []
             blockID         = makeName "block" blockIdentifier
-        maybe outofblockInstr inblockInstr $ M.lookup blockID constants
+        maybe outofblockInstr inblockInstr $ M.lookup blockID (trace ("current block: " ++ show blockID ++ "\n " ++ show name ++ ": " ++ show constants) constants)
 
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
@@ -319,6 +321,7 @@ compileInstr (S.If _ b1 b2) = do
 -- the index here is the levels of scopes. It's a WASM peculiarity
 compileInstr (S.Br i)       = do
   dest <- readScope $ fromIntegral i
+  modify (\st -> st { blockIdentifier = blockIdentifier st + 1 })
   pure [T $ AST.Do $ AST.Br dest []]
 
 compileInstr (S.BrIf i)     = do
@@ -326,21 +329,26 @@ compileInstr (S.BrIf i)     = do
   dest      <- readScope $ fromIntegral i
   operand   <- popOperand
   let fallthrough = makeName "block" $ blockIndx + 1
+  modify (\st -> st { blockIdentifier = blockIndx + 1 })
   pure [T $ AST.Do $ AST.CondBr operand dest fallthrough []]
 
 compileInstr (S.Block _ body) = do
   blockIndx <- blockIdentifier <$> get
-  modify (\st -> st { blockIdentifier = blockIndx + 1 })
   let numberOfBlocks = countBlocks body
-      name           = makeName "block" (blockIndx + numberOfBlocks)
-      term           = T $ AST.Do $ AST.Br name []
-      appendTerm     = appendIfLast (not . isTerm) term
-  push name
-  compiled <- concat <$> traverse compileInstr body
+      endOfBlock     = makeName "block" (blockIndx + numberOfBlocks)
+      term           = T $ AST.Do $ AST.Br endOfBlock []
+      wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
+  push endOfBlock
+  compiled <- concat <$> traverse compileInstr wasmInstrs
   pop
-  pure $ appendTerm compiled
-  -- pure compiled
+  pure compiled
     where
+      lastIsNotTerm [] = True
+      lastIsNotTerm l  = not $ isTerm $ last l
+
+      incrIf pred st | pred      = st { blockIdentifier = blockIdentifier st + 1 }
+                     | otherwise = st
+
       pop = do
         scopeStack <- blockScopeStack <$> get
         (_, tail)  <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
@@ -403,6 +411,9 @@ pushOperand op = modify (\st -> st { operandStack = op : operandStack st })
 pushOperands :: [AST.Operand] -> FuncGen ()
 pushOperands = mapM_ pushOperand
 
+incrLocalIdentifier :: FuncGen ()
+incrLocalIdentifier = modify (\st -> st { localIdentifier = localIdentifier st + 1 })
+
 operandType :: AST.Operand -> Type.Type
 operandType (AST.LocalReference t _) = t
 operandType (AST.ConstantOperand (Constant.Int bs _)) = Type.IntegerType bs
@@ -418,10 +429,8 @@ newInstructionConstructor idType        = do
   FuncST { localIdentifier, operandStack } <- get
   let name       = makeName "tmp" localIdentifier
       identifier = AST.LocalReference idType name
-  modify (\env -> env {
-      localIdentifier = localIdentifier + 1,
-      operandStack = identifier : operandStack
-    })
+  pushOperand identifier
+  incrLocalIdentifier
   pure (name AST.:=)
 
 packValues :: [AST.Operand] -> AST.Operand
@@ -454,11 +463,17 @@ wasmIsTerm _             = False
 countBlocks :: [S.Instruction Natural] -> Natural
 countBlocks = sum . fmap aux
   where
-    aux (S.If _ b1 b2) = 3 + countBlocks b1 + countBlocks b2
-    aux (S.Block _ l)  = 1 + countBlocks l
+    aux (S.If _ b1 b2) = 1 + oneIfTailIsTerm b1 + oneIfTailIsTerm b2 + countBlocks b1 + countBlocks b2
+    aux (S.Block _ l)  = oneIfTailIsTerm l + countBlocks l
     aux (S.Br _)       = 1
     aux (S.BrIf _)     = 1
     aux _              = 0
+
+    oneIfTailIsTerm = oneIfHead (not . wasmIsTerm) . reverse
+
+    oneIfHead _ []    = 0
+    oneIfHead g (x:_) | g x       = 1
+                      | otherwise = 0
 
 -- compiles one WASM function into an LLVM function.
 -- FIXME: rename assignments
@@ -495,9 +510,8 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
       llvmInstrs   <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
       remainingOps <- operandStack <$> get
       returnInstr  <- returnOperandStackItems
-      consts       <- localConst <$> get
       let blks = splitAfter isTerm
-               $ appendIfLast (not . isRet) (T returnInstr) (trace (show consts) llvmInstrs)
+               $ appendIfLast (not . isRet) (T returnInstr) llvmInstrs
           -- TODO: conditional additional block if the last item is a block and
           -- requested a jump to an additional block
           basicBlocks = fmap (buildBlock . assignName)

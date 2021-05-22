@@ -1,0 +1,21 @@
+(module
+  (export "foo" (func $foo))
+  (func $foo (result i32)
+    (local $x i32)
+    (local $y i32)
+    (i32.const 2)
+    (local.set $x)
+    (block
+      (block
+        (; x == 0 ;)
+        (local.get $x)
+        (i32.eqz)
+        (br_if 0)
+        (; the `else` case ;)
+        (i32.const 7)
+        (local.set $y)
+        (br 1))
+      (i32.const 42)
+      (local.set $y)
+      (br 0))
+    (local.get $y)))
