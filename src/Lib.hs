@@ -132,7 +132,8 @@ compileCmpOp :: POOI p -> p -> Word32 -> FuncGen [LLVMInstr]
 compileCmpOp cmp pred bs = do
   b          <- popOperand
   a          <- popOperand
-  constructor <- newInstructionConstructor $ Type.IntegerType bs
+  -- comparison operators return i1 sized booleans
+  constructor <- newInstructionConstructor $ Type.IntegerType 1
   pure [I $ constructor $ pooi cmp pred a b]
 
 iBitSize :: S.BitSize -> Word32
@@ -268,16 +269,13 @@ compileInstr (S.GetLocal n)        = const <|> ref
         FuncST { localVariableTypes, localConst, blockIdentifier } <- get
         varType     <- withMsg $ M.lookup name localVariableTypes
         constants   <- withMsg $ M.lookup name localConst
-        constructor <- newInstructionConstructor varType
         let outofblockInstr = do
-                pure $ pure
-                     $ I
-                     $ constructor
-                     $ AST.Phi varType (first AST.ConstantOperand . swap <$> M.assocs constants) []
+              constructor <- newInstructionConstructor varType
+              let operand = first AST.ConstantOperand . swap <$> M.assocs constants
+              pure [I $ constructor $ AST.Phi varType operand []]
             inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
-            -- inblockInstr c  = pure []
             blockID         = makeName "block" blockIdentifier
-        maybe outofblockInstr inblockInstr $ M.lookup blockID (trace ("current block: " ++ show blockID ++ "\n " ++ show name ++ ": " ++ show constants) constants)
+        maybe outofblockInstr inblockInstr $ M.lookup blockID constants
 
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
@@ -334,10 +332,10 @@ compileInstr (S.BrIf i)     = do
 
 compileInstr (S.Block _ body) = do
   blockIndx <- blockIdentifier <$> get
-  let numberOfBlocks = countBlocks body
+  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
+      numberOfBlocks = countBlocks wasmInstrs
       endOfBlock     = makeName "block" (blockIndx + numberOfBlocks)
       term           = T $ AST.Do $ AST.Br endOfBlock []
-      wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
   push endOfBlock
   compiled <- concat <$> traverse compileInstr wasmInstrs
   pop
@@ -442,7 +440,7 @@ returnOperandStackItems :: FuncGen (AST.Named AST.Terminator)
 returnOperandStackItems = do
   FuncST { operandStack } <- get
   let ret = do guard $ not $ L.null operandStack
-               pure $ packValues (trace (show operandStack) operandStack)
+               pure $ packValues operandStack
   modify (\env -> env { operandStack = [] })
   pure $ AST.Do $ AST.Ret ret []
 
@@ -463,13 +461,13 @@ wasmIsTerm _             = False
 countBlocks :: [S.Instruction Natural] -> Natural
 countBlocks = sum . fmap aux
   where
-    aux (S.If _ b1 b2) = 1 + oneIfTailIsTerm b1 + oneIfTailIsTerm b2 + countBlocks b1 + countBlocks b2
-    aux (S.Block _ l)  = oneIfTailIsTerm l + countBlocks l
+    aux (S.If _ b1 b2) = 1 + oneIfTailIsNotTerm b1 + oneIfTailIsNotTerm b2 + countBlocks b1 + countBlocks b2
+    aux (S.Block _ l)  = oneIfTailIsNotTerm l + countBlocks l
     aux (S.Br _)       = 1
     aux (S.BrIf _)     = 1
     aux _              = 0
 
-    oneIfTailIsTerm = oneIfHead (not . wasmIsTerm) . reverse
+    oneIfTailIsNotTerm = oneIfHead (not . wasmIsTerm) . reverse
 
     oneIfHead _ []    = 0
     oneIfHead g (x:_) | g x       = 1

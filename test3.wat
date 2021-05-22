@@ -26,5 +26,5 @@
         (br 1))
       (i32.const 99)
       (local.set $y)
-          )
+      (br 0))
     (local.get $y)))
