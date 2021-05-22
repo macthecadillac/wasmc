@@ -257,25 +257,25 @@ compileInstr (S.GetGlobal n)       = error "not implemented: GetGlobal"
 -- `<|>` is the choice operator. It tries the first branch, and if it fails,
 -- goes on to try the second branch.
 compileInstr (S.GetLocal n)        = const <|> ref
-    where
-      name = makeName "local" n
-      withMsg = maybe (F.fail $ "unbound reference: " ++ show name) pure
-      ref = do
-        FuncST { localVariableTypes } <- get
-        operand <- withMsg $ AST.LocalReference <$> M.lookup name localVariableTypes <*> pure name
-        pushOperand operand
-        pure []
-      const = do
-        FuncST { localVariableTypes, localConst, blockIdentifier } <- get
-        varType     <- withMsg $ M.lookup name localVariableTypes
-        constants   <- withMsg $ M.lookup name localConst
-        let outofblockInstr = do
-              constructor <- newInstructionConstructor varType
-              let operand = first AST.ConstantOperand . swap <$> M.assocs constants
-              pure [I $ constructor $ AST.Phi varType operand []]
-            inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
-            blockID         = makeName "block" blockIdentifier
-        maybe outofblockInstr inblockInstr $ M.lookup blockID constants
+  where
+    name = makeName "local" n
+    withMsg = maybe (F.fail $ "unbound reference: " ++ show name) pure
+    ref = do
+      FuncST { localVariableTypes } <- get
+      operand <- withMsg $ AST.LocalReference <$> M.lookup name localVariableTypes <*> pure name
+      pushOperand operand
+      pure []
+    const = do
+      FuncST { localVariableTypes, localConst, blockIdentifier } <- get
+      varType     <- withMsg $ M.lookup name localVariableTypes
+      constants   <- withMsg $ M.lookup name localConst
+      let outofblockInstr = do
+            constructor <- newInstructionConstructor varType
+            let operand = first AST.ConstantOperand . swap <$> M.assocs constants
+            pure [I $ constructor $ AST.Phi varType operand []]
+          inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
+          blockID         = makeName "block" blockIdentifier
+      maybe outofblockInstr inblockInstr $ M.lookup blockID constants
 
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
@@ -298,23 +298,26 @@ compileInstr (S.Call i) = do
 -- TODO: will need to be modified for multiple returns. Think about the
 -- difference branches and residual items on the stack before entering each
 -- branch
+-- TODO: keep track of variable scope like you do for constants. This should
+-- solve the problem
 compileInstr S.Return = pure . T <$> returnOperandStackItems
 
 compileInstr (S.If _ b1 b2) = do
   blockIndx <- blockIdentifier <$> get
+  let b1Count    = countTerminals b1
+      b2Count    = countTerminals b2
+      b1Ident    = makeName "block" $ blockIndx + 1
+      b2Ident    = makeName "block" $ blockIndx + b1Count + 2
+      endIf      = makeName "block" $ blockIndx + b1Count + b2Count + 3
+      appendTerm = appendIfLast (not . wasmIsTerm) (S.Br 0)
   modify (\st -> st { blockIdentifier = blockIndx + 1 })
-  let b1SubBlocks = countBlocks b1
-      b2SubBlocks = countBlocks b2
-      b1Ident     = makeName "block" $ blockIndx + 1
-      b2Ident     = makeName "block" $ blockIndx + b1SubBlocks + 1
-      fallthrough = makeName "block" (blockIndx + b1SubBlocks + b2SubBlocks)
-      term        = T $ AST.Do $ AST.Br fallthrough []
-      appendTerm  = appendIfLast (not . isTerm) term
   operand    <- popOperand
-  b1Compiled <- concat <$> traverse compileInstr b1
-  b2Compiled <- concat <$> traverse compileInstr b2
+  pushScope endIf
+  b1Compiled <- concat <$> traverse compileInstr (appendTerm b1)
+  b2Compiled <- concat <$> traverse compileInstr (appendTerm b2)
+  popScope
   let instr = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
-  pure $ instr : appendTerm b1Compiled ++ appendTerm b2Compiled
+  pure $ instr : b1Compiled ++ b2Compiled
 
 -- the index here is the levels of scopes. It's a WASM peculiarity
 compileInstr (S.Br i)       = do
@@ -327,18 +330,18 @@ compileInstr (S.BrIf i)     = do
   dest      <- readScope $ fromIntegral i
   operand   <- popOperand
   let fallthrough = makeName "block" $ blockIndx + 1
-  modify (\st -> st { blockIdentifier = blockIndx + 1 })
+  modify (\st -> st { blockIdentifier = blockIdentifier st + 1 })
   pure [T $ AST.Do $ AST.CondBr operand dest fallthrough []]
 
 compileInstr (S.Block _ body) = do
   blockIndx <- blockIdentifier <$> get
   let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
-      numberOfBlocks = countBlocks wasmInstrs
+      numberOfBlocks = countTerminals wasmInstrs
       endOfBlock     = makeName "block" (blockIndx + numberOfBlocks)
       term           = T $ AST.Do $ AST.Br endOfBlock []
-  push endOfBlock
+  pushScope endOfBlock
   compiled <- concat <$> traverse compileInstr wasmInstrs
-  pop
+  popScope
   pure compiled
     where
       lastIsNotTerm [] = True
@@ -347,15 +350,16 @@ compileInstr (S.Block _ body) = do
       incrIf pred st | pred      = st { blockIdentifier = blockIdentifier st + 1 }
                      | otherwise = st
 
-      pop = do
-        scopeStack <- blockScopeStack <$> get
-        (_, tail)  <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
-        modify (\st -> st { blockScopeStack = tail })
-
-      push :: Name.Name -> FuncGen ()
-      push s = modify (\st -> st { blockScopeStack = s : blockScopeStack st })
-
 compileInstr instr = error $ "not implemented: " ++ show instr
+
+popScope :: FuncGen ()
+popScope = do
+  scopeStack <- blockScopeStack <$> get
+  (_, tail)  <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
+  modify (\st -> st { blockScopeStack = tail })
+
+pushScope :: Name.Name -> FuncGen ()
+pushScope s = modify (\st -> st { blockScopeStack = s : blockScopeStack st })
 
 readScope :: Int -> FuncGen Name.Name
 readScope i = do
@@ -458,11 +462,11 @@ wasmIsTerm (S.BrIf _)    = True
 wasmIsTerm (S.Block _ _) = True
 wasmIsTerm _             = False
 
-countBlocks :: [S.Instruction Natural] -> Natural
-countBlocks = sum . fmap aux
+countTerminals :: [S.Instruction Natural] -> Natural
+countTerminals = sum . fmap aux
   where
-    aux (S.If _ b1 b2) = 1 + oneIfTailIsNotTerm b1 + oneIfTailIsNotTerm b2 + countBlocks b1 + countBlocks b2
-    aux (S.Block _ l)  = oneIfTailIsNotTerm l + countBlocks l
+    aux (S.If _ b1 b2) = oneIfTailIsNotTerm b1 + oneIfTailIsNotTerm b2 + countTerminals b1 + countTerminals b2
+    aux (S.Block _ l)  = oneIfTailIsNotTerm l + countTerminals l
     aux (S.Br _)       = 1
     aux (S.BrIf _)     = 1
     aux _              = 0
