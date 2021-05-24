@@ -28,9 +28,11 @@ import qualified LLVM.AST.Float as Float
 import qualified LLVM.AST.IntegerPredicate as IPred
 import qualified LLVM.AST.FloatingPointPredicate as FPred
 import qualified LLVM.AST.Name as Name
+import qualified LLVM.AST.Operand as Operand
 import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
 
+import Intrinsics
 import Gen
 import Numeric.Natural
 import Utils (appendIfLast, makeName, splitAfter, unsnoc)
@@ -73,13 +75,13 @@ isTerm :: LLVMInstr -> Bool
 isTerm (T _) = True
 isTerm _     = False
 
-iBitSize :: S.BitSize -> Word32
-iBitSize S.BS32 = 32
-iBitSize S.BS64 = 64
+iBitSize :: S.BitSize -> Type.Type
+iBitSize S.BS32 = Type.i32
+iBitSize S.BS64 = Type.i64
 
-fBitSize :: S.BitSize -> Type.FloatingPointType
-fBitSize S.BS32 = Type.FloatFP
-fBitSize S.BS64 = Type.DoubleFP
+fBitSize :: S.BitSize -> Type.Type
+fBitSize S.BS32 = Type.float
+fBitSize S.BS64 = Type.double
 
 operandType :: AST.Operand -> Type.Type
 operandType (AST.LocalReference t _) = t
@@ -131,25 +133,45 @@ compileUnOp builder op t = do
   constructor <- newInstructionConstructor t
   pure [I $ constructor $ builder op a]
 
-compileCmpOp :: POOI p -> p -> Word32 -> FuncGen [LLVMInstr]
-compileCmpOp cmp pred bs = do
+compileCmpOp :: POOI p -> p -> FuncGen [LLVMInstr]
+compileCmpOp cmp pred = do
   b          <- popOperand
   a          <- popOperand
   -- comparison operators return i1 sized booleans
-  constructor <- newInstructionConstructor $ Type.IntegerType 1
+  constructor <- newInstructionConstructor $ Type.i1
   pure [I $ constructor $ pooi cmp pred a b]
 
 compilefMinMax :: S.BitSize -> S.FRelOp -> FuncGen [LLVMInstr]
 compilefMinMax bs pred = do
-  b       <- popOperand
-  a       <- popOperand
+  b     <- popOperand
+  a     <- popOperand
   pushOperand a
   pushOperand b
   pushOperand a
   pushOperand b
-  operand <- compileInstr (S.FRelOp bs pred)
-  instr   <- compileInstr S.Select
-  pure $ operand ++ instr
+  bool  <- compileInstr (S.FRelOp bs pred)
+  instr <- compileInstr S.Select
+  pure $ bool ++ instr
+
+compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> FuncGen [LLVMInstr]
+compileFunctionCall name arguments returnType = do
+  let nArgs                        = fromIntegral (L.length $ arguments)
+      function                     = AST.ConstantOperand
+                                   $ flip Constant.GlobalReference name 
+                                   $ Type.FunctionType returnType arguments False
+  -- pop the required number of operands off the `operandStack` and
+  -- collect the results into a list. `replicateM` deals with the
+  -- FuncGen monad.
+  args       <- replicateM (fromIntegral nArgs) popOperand
+  let arguments = [(operand, []) | operand <- args]
+      instr     = AST.Call Nothing Conv.C [] (Right function) arguments [] []
+  constructor <- newInstructionConstructor returnType
+  pure [I $ constructor instr]
+
+callIntrinsics :: String -> FuncGen [LLVMInstr]
+callIntrinsics name = do
+  let FT { arguments, returnType } = llvmIntrinsicsTypes M.! name
+  compileFunctionCall (Name.mkName name) arguments returnType
 
 compileInstr :: S.Instruction Natural -> FuncGen [LLVMInstr]
 compileInstr S.Unreachable          = undefined
@@ -159,7 +181,8 @@ compileInstr (S.IUnOp bs S.IClz)    = undefined
 compileInstr (S.IUnOp bs S.ICtz)    = undefined
 compileInstr (S.IUnOp bs S.IPopcnt) = undefined
 
-compileInstr (S.FUnOp bs S.FAbs)     = undefined
+compileInstr (S.FUnOp S.BS32 S.FAbs) = callIntrinsics "llvm.abs.f32"
+compileInstr (S.FUnOp S.BS64 S.FAbs) = callIntrinsics "llvm.abs.f64"
 compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) *> compileInstr (S.FBinOp S.BS32 S.FMul)
 compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) *> compileInstr (S.FBinOp S.BS64 S.FMul)
 compileInstr (S.FUnOp bs S.FCeil)    = undefined
@@ -183,42 +206,42 @@ compileInstr S.F64PromoteF32         = undefined
 compileInstr (S.IReinterpretF bs)    = undefined
 compileInstr (S.FReinterpretI bs)    = undefined
 
-compileInstr (S.IBinOp bs S.IAdd)  = compileBinOp bbooi AST.Add  $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.ISub)  = compileBinOp bbooi AST.Sub  $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.IMul)  = compileBinOp bbooi AST.Mul  $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.IDivS) = compileBinOp booi  AST.SDiv $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.IRemS) = compileBinOp ooi   AST.SRem $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.IAnd)  = compileBinOp ooi   AST.And  $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.IOr)   = compileBinOp ooi   AST.Or   $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.IXor)  = compileBinOp ooi   AST.Xor  $ Type.IntegerType $ iBitSize bs
-compileInstr (S.IBinOp bs S.IShl)  = compileBinOp bbooi AST.Shl  $ Type.IntegerType $ iBitSize bs
+compileInstr (S.IBinOp bs S.IAdd)  = compileBinOp bbooi AST.Add  $ iBitSize bs
+compileInstr (S.IBinOp bs S.ISub)  = compileBinOp bbooi AST.Sub  $ iBitSize bs
+compileInstr (S.IBinOp bs S.IMul)  = compileBinOp bbooi AST.Mul  $ iBitSize bs
+compileInstr (S.IBinOp bs S.IDivS) = compileBinOp booi  AST.SDiv $ iBitSize bs
+compileInstr (S.IBinOp bs S.IRemS) = compileBinOp ooi   AST.SRem $ iBitSize bs
+compileInstr (S.IBinOp bs S.IAnd)  = compileBinOp ooi   AST.And  $ iBitSize bs
+compileInstr (S.IBinOp bs S.IOr)   = compileBinOp ooi   AST.Or   $ iBitSize bs
+compileInstr (S.IBinOp bs S.IXor)  = compileBinOp ooi   AST.Xor  $ iBitSize bs
+compileInstr (S.IBinOp bs S.IShl)  = compileBinOp bbooi AST.Shl  $ iBitSize bs
 
-compileInstr (S.IRelOp bs S.IEq)   = compileCmpOp AST.ICmp IPred.EQ  $ iBitSize bs
-compileInstr (S.IRelOp bs S.INe)   = compileCmpOp AST.ICmp IPred.NE  $ iBitSize bs
-compileInstr (S.IRelOp bs S.ILtU)  = compileCmpOp AST.ICmp IPred.ULT $ iBitSize bs
-compileInstr (S.IRelOp bs S.ILtS)  = compileCmpOp AST.ICmp IPred.SLT $ iBitSize bs
-compileInstr (S.IRelOp bs S.IGtU)  = compileCmpOp AST.ICmp IPred.UGT $ iBitSize bs
-compileInstr (S.IRelOp bs S.IGtS)  = compileCmpOp AST.ICmp IPred.SGT $ iBitSize bs
-compileInstr (S.IRelOp bs S.ILeU)  = compileCmpOp AST.ICmp IPred.ULE $ iBitSize bs
-compileInstr (S.IRelOp bs S.ILeS)  = compileCmpOp AST.ICmp IPred.SLE $ iBitSize bs
-compileInstr (S.IRelOp bs S.IGeU)  = compileCmpOp AST.ICmp IPred.UGE $ iBitSize bs
-compileInstr (S.IRelOp bs S.IGeS)  = compileCmpOp AST.ICmp IPred.SGE $ iBitSize bs
+compileInstr (S.IRelOp _  S.IEq)   = compileCmpOp AST.ICmp IPred.EQ
+compileInstr (S.IRelOp _  S.INe)   = compileCmpOp AST.ICmp IPred.NE
+compileInstr (S.IRelOp _  S.ILtU)  = compileCmpOp AST.ICmp IPred.ULT
+compileInstr (S.IRelOp _  S.ILtS)  = compileCmpOp AST.ICmp IPred.SLT
+compileInstr (S.IRelOp _  S.IGtU)  = compileCmpOp AST.ICmp IPred.UGT
+compileInstr (S.IRelOp _  S.IGtS)  = compileCmpOp AST.ICmp IPred.SGT
+compileInstr (S.IRelOp _  S.ILeU)  = compileCmpOp AST.ICmp IPred.ULE
+compileInstr (S.IRelOp _  S.ILeS)  = compileCmpOp AST.ICmp IPred.SLE
+compileInstr (S.IRelOp _  S.IGeU)  = compileCmpOp AST.ICmp IPred.UGE
+compileInstr (S.IRelOp _  S.IGeS)  = compileCmpOp AST.ICmp IPred.SGE
 
-compileInstr (S.FBinOp bs S.FAdd)  = compileBinOp fooi AST.FAdd $ Type.FloatingPointType $ fBitSize bs
-compileInstr (S.FBinOp bs S.FSub)  = compileBinOp fooi AST.FSub $ Type.FloatingPointType $ fBitSize bs
-compileInstr (S.FBinOp bs S.FMul)  = compileBinOp fooi AST.FMul $ Type.FloatingPointType $ fBitSize bs
-compileInstr (S.FBinOp bs S.FDiv)  = compileBinOp fooi AST.FDiv $ Type.FloatingPointType $ fBitSize bs
+compileInstr (S.FBinOp bs S.FAdd)  = compileBinOp fooi AST.FAdd $ fBitSize bs
+compileInstr (S.FBinOp bs S.FSub)  = compileBinOp fooi AST.FSub $ fBitSize bs
+compileInstr (S.FBinOp bs S.FMul)  = compileBinOp fooi AST.FMul $ fBitSize bs
+compileInstr (S.FBinOp bs S.FDiv)  = compileBinOp fooi AST.FDiv $ fBitSize bs
 compileInstr (S.FBinOp bs S.FMin)  = compilefMinMax bs S.FLt
 compileInstr (S.FBinOp bs S.FMax)  = compilefMinMax bs S.FGt
 -- value of the first argument, sign of the second argument
 -- compileInstr (S.FBinOp bs S.FCopySign) = compileBinOp booi  AST.SDiv $ Type.IntegerType $ iBitSize bs
 
-compileInstr (S.FRelOp bs S.FEq)   = compileCmpOp AST.FCmp FPred.OEQ $ iBitSize bs
-compileInstr (S.FRelOp bs S.FNe)   = compileCmpOp AST.FCmp FPred.ONE $ iBitSize bs
-compileInstr (S.FRelOp bs S.FLt)   = compileCmpOp AST.FCmp FPred.OLT $ iBitSize bs
-compileInstr (S.FRelOp bs S.FGt)   = compileCmpOp AST.FCmp FPred.OGT $ iBitSize bs
-compileInstr (S.FRelOp bs S.FLe)   = compileCmpOp AST.FCmp FPred.OLE $ iBitSize bs
-compileInstr (S.FRelOp bs S.FGe)   = compileCmpOp AST.FCmp FPred.OGE $ iBitSize bs
+compileInstr (S.FRelOp _  S.FEq)   = compileCmpOp AST.FCmp FPred.OEQ
+compileInstr (S.FRelOp _  S.FNe)   = compileCmpOp AST.FCmp FPred.ONE
+compileInstr (S.FRelOp _  S.FLt)   = compileCmpOp AST.FCmp FPred.OLT
+compileInstr (S.FRelOp _  S.FGt)   = compileCmpOp AST.FCmp FPred.OGT
+compileInstr (S.FRelOp _  S.FLe)   = compileCmpOp AST.FCmp FPred.OLE
+compileInstr (S.FRelOp _  S.FGe)   = compileCmpOp AST.FCmp FPred.OGE
 
 compileInstr S.Select              = do
   cond        <- popOperand
@@ -275,20 +298,8 @@ compileInstr (S.GetLocal n)        = const <|> ref
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
   let FT { arguments, returnType } = functionTypes M.! i
-      nArgs                        = L.length $ arguments
       name                         = makeName "func" i
-      function                     = Right
-                                   $ AST.ConstantOperand
-                                   $ flip Constant.GlobalReference name 
-                                   $ Type.FunctionType returnType arguments False
-  -- pop the required number of operands off the `operandStack` and
-  -- collect the results into a list. `replicateM` deals with the
-  -- FuncGen monad.
-  args       <- replicateM nArgs popOperand
-  let arguments = [(operand, []) | operand <- args]
-      instr     = AST.Call Nothing Conv.C [] function arguments [] []
-  constructor <- newInstructionConstructor returnType
-  pure [I $ constructor instr]
+  compileFunctionCall name arguments returnType
 
 -- TODO: will need to be modified for multiple returns. Think about the
 -- difference branches and residual items on the stack before entering each
@@ -482,20 +493,20 @@ compileTable index table = fail "rip"
 compileModule :: S.Module -> Either String AST.Module
 compileModule wasmMod = evalModGen modGen initModEnv
   where
-    startFunctionIndex = (\(S.StartFunction n) -> n) <$> S.start wasmMod
-    functionTypes      = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
-    initModEnv         = ModEnv startFunctionIndex functionTypes
-    wasmGlobals        = zip [0..] $ S.globals wasmMod
-    wasmTables         = zip [0..] $ S.tables wasmMod
-    wasmFuncs          = zip [0..] $ S.functions wasmMod
-    modGen             = do
+    startFunctionIndex  = (\(S.StartFunction n) -> n) <$> S.start wasmMod
+    functionTypes       = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
+    initModEnv          = ModEnv startFunctionIndex functionTypes
+    wasmGlobals         = zip [0..] $ S.globals wasmMod
+    wasmTables          = zip [0..] $ S.tables wasmMod
+    wasmFuncs           = zip [0..] $ S.functions wasmMod
+    modGen              = do
       globals <- traverse (uncurry compileGlobals) wasmGlobals
       -- tables  <- traverse (uncurry compileTable) wasmTables
       defs    <- traverse (uncurry compileFunction) wasmFuncs
       pure $ AST.defaultModule
         { AST.moduleName = "basic",
           AST.moduleDefinitions = 
-            (AST.GlobalDefinition <$> defs) ++
+            (AST.GlobalDefinition <$> (llvmIntrinsics ++ defs)) ++
             [
               AST.TypeDefinition "Elem" (Just (AST.StructureType False [Type.i32, Type.ptr (Type.FunctionType Type.void [] False)]))
             , AST.TypeDefinition "Table" (Just (AST.StructureType False [Type.ptr (Type.NamedTypeReference "Elem"), Type.i32, Type.i32]))
