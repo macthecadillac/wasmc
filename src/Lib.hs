@@ -75,6 +75,10 @@ isTerm :: LLVMInstr -> Bool
 isTerm (T _) = True
 isTerm _     = False
 
+sBitSize :: S.BitSize -> String
+sBitSize S.BS32 = "32"
+sBitSize S.BS64 = "64"
+
 iBitSize :: S.BitSize -> Type.Type
 iBitSize S.BS32 = Type.i32
 iBitSize S.BS64 = Type.i64
@@ -92,6 +96,7 @@ operandType t = error $ "Not a recognized type: " ++ show t
 
 -- check if a wasm instruction will be compiled to a terminator in LLVM
 wasmIsTerm :: S.Instruction a -> Bool
+wasmIsTerm S.Unreachable = True
 wasmIsTerm S.Return      = True
 wasmIsTerm (S.If _ _ _)  = True
 wasmIsTerm (S.Br _)      = True
@@ -174,22 +179,21 @@ callIntrinsics name = do
   compileFunctionCall (Name.mkName name) arguments returnType
 
 compileInstr :: S.Instruction Natural -> FuncGen [LLVMInstr]
-compileInstr S.Unreachable          = undefined
+compileInstr S.Unreachable          = pure [T $ AST.Do $ AST.Unreachable []]
 compileInstr S.Nop                  = pure []
 
-compileInstr (S.IUnOp bs S.IClz)    = undefined
-compileInstr (S.IUnOp bs S.ICtz)    = undefined
-compileInstr (S.IUnOp bs S.IPopcnt) = undefined
+compileInstr (S.IUnOp bs S.IClz)    = pushOperand false *> callIntrinsics ("llvm.ctlz.i" ++ sBitSize bs)
+compileInstr (S.IUnOp bs S.ICtz)    = pushOperand false *> callIntrinsics ("llvm.cttz.i" ++ sBitSize bs)
+compileInstr (S.IUnOp bs S.IPopcnt) = callIntrinsics $ "llvm.ctpop.i" ++ sBitSize bs
 
-compileInstr (S.FUnOp S.BS32 S.FAbs) = callIntrinsics "llvm.abs.f32"
-compileInstr (S.FUnOp S.BS64 S.FAbs) = callIntrinsics "llvm.abs.f64"
+compileInstr (S.FUnOp bs S.FAbs)     = callIntrinsics $ "llvm.fabs.f" ++ sBitSize bs
 compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) *> compileInstr (S.FBinOp S.BS32 S.FMul)
 compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) *> compileInstr (S.FBinOp S.BS64 S.FMul)
-compileInstr (S.FUnOp bs S.FCeil)    = undefined
-compileInstr (S.FUnOp bs S.FFloor)   = undefined
-compileInstr (S.FUnOp bs S.FTrunc)   = undefined
-compileInstr (S.FUnOp bs S.FNearest) = undefined
-compileInstr (S.FUnOp bs S.FSqrt)    = undefined
+compileInstr (S.FUnOp bs S.FCeil)    = callIntrinsics $ "llvm.ceil.f" ++ sBitSize bs
+compileInstr (S.FUnOp bs S.FFloor)   = callIntrinsics $ "llvm.floor.f" ++ sBitSize bs
+compileInstr (S.FUnOp bs S.FTrunc)   = callIntrinsics $ "llvm.trunc.f" ++ sBitSize bs
+compileInstr (S.FUnOp bs S.FNearest) = callIntrinsics $ "llvm.roundeven.f" ++ sBitSize bs
+compileInstr (S.FUnOp bs S.FSqrt)    = callIntrinsics $ "llvm.sqrt.f" ++ sBitSize bs
 
 compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) *> compileInstr (S.IRelOp S.BS32 S.IEq)
 compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) *> compileInstr (S.IRelOp S.BS64 S.IEq)
