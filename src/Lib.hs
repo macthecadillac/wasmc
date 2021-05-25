@@ -168,7 +168,7 @@ compileFunctionCall name arguments returnType = do
   -- collect the results into a list. `replicateM` deals with the
   -- FuncGen monad.
   args       <- replicateM (fromIntegral nArgs) popOperand
-  let arguments = [(operand, []) | operand <- args]
+  let arguments = reverse [(operand, []) | operand <- args]
       instr     = AST.Call Nothing Conv.C [] (Right function) arguments [] []
   constructor <- newInstructionConstructor returnType
   pure [I $ constructor instr]
@@ -267,8 +267,6 @@ compileInstr (S.SetLocal n)        = do
   unassignConstant ident
   a <- popOperand
   case a of
-    -- for references, this is acieved by renaming identifiers at the
-    -- end
     (AST.LocalReference _ name) -> addRenameAction name ident $> []
     (AST.ConstantOperand const) -> assignConstant ident const $> []
     _                           -> error "unsupported operand"
@@ -388,7 +386,6 @@ compileRetTypeList [t] = compileType t
 compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 
 -- compiles one WASM function into an LLVM function.
--- FIXME: rename assignments
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalFuncGen funcGen initFuncST
   where
@@ -419,7 +416,8 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
             pure (makeName "local" n, t)
       modify (\st -> st { localVariableTypes = M.fromAscList localVariables })
       -- compile basic blocks and collect the results
-      llvmInstrs   <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
+      instrs       <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
+      llvmInstrs   <- renameInstrs instrs
       remainingOps <- operandStack <$> get
       returnInstr  <- returnOperandStackItems
       let blks = splitAfter isTerm
@@ -445,6 +443,15 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
 
     unwrapI (I i) = i
     unwrapI term  = error $ "Not an LLVM instruction: " ++ show term
+
+    -- rename instructions to reflect "variable" assignments
+    renameInstrs = traverse renameInstr
+      where
+        renameInstr :: LLVMInstr -> FuncGen LLVMInstr
+        renameInstr (I ((AST.:=) name instr)) = I . flip (AST.:=) instr . rename name <$> get
+        renameInstr t@(I _)                   = pure t
+        renameInstr t@(T _)                   = pure t
+        rename name = fromMaybe name . M.lookup name . renameMap
 
 -- globals in the WASM sense of the term
 compileGlobals :: Natural -> S.Global -> ModGen AST.Global

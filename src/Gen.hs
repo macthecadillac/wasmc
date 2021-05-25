@@ -9,9 +9,11 @@ import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State.Lazy
 import qualified Data.Map as M
+import Data.Maybe
 import qualified Data.List as L
 import qualified LLVM.AST as AST
 import qualified LLVM.AST.Constant as Constant
+import qualified LLVM.AST.Operand as Op
 import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Type as Type
 import Numeric.Natural
@@ -89,12 +91,18 @@ addRenameAction name newName =
   modify (\st -> st { renameMap = M.insert name newName $ renameMap st })
 
 -- pop operand off the `operandStack`
+-- the rename action here should always be valid because of SSA and because we
+-- do not reuse identifiers
 popOperand :: FuncGen AST.Operand
 popOperand = do
-  stack           <- operandStack <$> get
-  (operand, rest) <- maybe (F.fail "not enough operands") pure $ L.uncons stack
+  stack      <- operandStack <$> get
+  (op, rest) <- maybe (F.fail "not enough operands") pure $ L.uncons stack
+  operand    <- rename op <$> get
   modify (\st -> st { operandStack = rest })
   pure operand
+    where
+      rename (Op.LocalReference t name) = Op.LocalReference t . fromMaybe name . M.lookup name . renameMap
+      rename op                         = const op
 
 pushOperand :: AST.Operand -> FuncGen ()
 pushOperand op = modify (\st -> st { operandStack = op : operandStack st })
