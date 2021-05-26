@@ -19,7 +19,7 @@ import Debug.Trace
 
 import qualified Language.Wasm as Wasm
 import qualified Language.Wasm.Structure as S
-import qualified Language.Wasm.Structure (Function(..))
+import qualified Language.Wasm.Structure (Function(..), MemArg(..))
 
 import qualified LLVM.AST as AST
 import qualified LLVM.AST.CallingConvention as Conv
@@ -36,6 +36,7 @@ import Intrinsics
 import Gen
 import Numeric.Natural
 import Utils (appendIfLast, makeName, splitAfter, unsnoc)
+import qualified LLVM.AST as AST.Instruction
 
 type BOI    = Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
 type BOOI   = Bool -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
@@ -44,10 +45,21 @@ type FOOI   = AST.FastMathFlags -> AST.Operand -> AST.Operand -> AST.Instruction
 type POOI p = p -> AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
 type OOI    = AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
 type MOI    = Maybe AST.Operand -> AST.InstructionMetadata -> AST.Terminator
+type BOMWI = Bool -> AST.Operand -> Maybe AST.Atomicity -> Word32 -> AST.InstructionMetadata -> AST.Instruction
+type BOOMWI = Bool -> AST.Operand -> AST.Operand -> Maybe AST.Atomicity -> Word32 -> AST.InstructionMetadata -> AST.Instruction
 
 type UnOpBuilder a = a -> AST.Operand -> AST.Instruction
 type BinOpBuilder a = a -> AST.Operand -> AST.Operand -> AST.Instruction
 type CmpBuilder p = POOI p -> p -> AST.Operand -> AST.Operand -> AST.Instruction
+type LoadMemBuilder = AST.Operand -> Word32 -> AST.Instruction
+type StoreMemBuilder = AST.Operand -> AST.Operand -> Word32 -> AST.Instruction
+
+
+bomwi :: LoadMemBuilder
+bomwi addr aln = AST.Load False addr Nothing aln []
+
+boomwi :: StoreMemBuilder
+boomwi addr val aln = AST.Store False addr val Nothing aln []
 
 boi :: UnOpBuilder BOI
 boi op a = op False a []
@@ -78,6 +90,10 @@ isTerm _     = False
 sBitSize :: S.BitSize -> String
 sBitSize S.BS32 = "32"
 sBitSize S.BS64 = "64"
+
+nBitSize :: S.BitSize -> Word32
+nBitSize S.BS32 = 32
+nBitSize S.BS64 = 64
 
 iBitSize :: S.BitSize -> Type.Type
 iBitSize S.BS32 = Type.i32
@@ -143,7 +159,7 @@ compileCmpOp cmp pred = do
   b          <- popOperand
   a          <- popOperand
   -- comparison operators return i1 sized booleans
-  constructor <- newInstructionConstructor $ Type.i1
+  constructor <- newInstructionConstructor Type.i1
   pure [I $ constructor $ pooi cmp pred a b]
 
 compilefMinMax :: S.BitSize -> S.FRelOp -> FuncGen [LLVMInstr]
@@ -160,7 +176,7 @@ compilefMinMax bs pred = do
 
 compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> FuncGen [LLVMInstr]
 compileFunctionCall name arguments returnType = do
-  let nArgs                        = fromIntegral (L.length $ arguments)
+  let nArgs                        = fromIntegral (L.length arguments)
       function                     = AST.ConstantOperand
                                    $ flip Constant.GlobalReference name 
                                    $ Type.FunctionType returnType arguments False
@@ -366,7 +382,34 @@ compileInstr (S.Loop _ body) = do
   popScope
   pure $ start : compiled
 
+compileInstr (S.I32Load memArg) = compileMemInstr S.BS32 bomwi memArg
+compileInstr (S.I64Load memArg) = compileMemInstr S.BS64 bomwi memArg
+compileInstr (S.F32Load memArg) = compileMemInstr S.BS32 bomwi memArg
+compileInstr (S.F64Load memArg) = compileMemInstr S.BS64 bomwi memArg
+-- compileInstr (S.I32Load8S  S.MemArArBS) = compileMemInstr S.BS32 bomwi memArg
+compileInstr (S.I32Load8U  memArg) = compileMemInstr S.BS32 bomwi memArg
+-- compileInstr (S.I32Load16S  S.MemArg) = compileMemInstr S.BS32 bomwi memArg
+-- compileInstr (S.I32Load16U  S.MemArg) = compileMemInstr S.BS32 bomwi memArg
+-- compileInstr (S.I64Load8S  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
+-- compileInstr (S.I64Load8U  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
+-- compileInstr (S.I64Load16S  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
+-- compileInstr (S.I64Load16U  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
+-- compileInstr (S.I64Load32S  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
+-- compileInstr (S.I64Load32U  memArg) = compileMemInstr S.BS64 bomwi memArg
+
+
+compileInstr (S.I32Store memArg) = compileMem2Instr S.BS32 boomwi memArg
+compileInstr (S.I64Store memArg) = compileMem2Instr S.BS64 boomwi memArg
+-- compileInstr (S.F32Store S.MemArg) = compileMem2Instr S.BS32 boomwi memArg
+-- compileInstr (S.F64Store S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
+-- compileInstr (S.I32Store8 S.MemArg) = compileMem2Instr S.BS32 boomwi memArg
+-- compileInstr (S.I32Store16 S.MemArg) = compileMem2Instr S.BS32 boomwi memArg
+-- compileInstr (S.I64Store8 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
+-- compileInstr (S.I64Store16 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
+-- compileInstr (S.I64Store32 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
+
 compileInstr instr = error $ "not implemented: " ++ show instr
+
 
 compileType :: S.ValueType -> Type.Type
 compileType S.I32 = Type.IntegerType 32
@@ -486,18 +529,94 @@ compileGlobals index global = globVar
 -- AST.moduleDefinitions Module
 -- ASTElem = Type.StructureType false [Type.IntegerType, Type.FunctionType]
 
-compileTable :: Natural -> S.Table -> ModGen Global.Global
-compileTable index table = fail "rip"
--- compileTable index table = do
---   let instrs = [AST.Alloca (Type.NamedTypeReference "Elem") (AST.ConstantOperand 1) 8 []]
---   pure $ Global.Global {
---
---   }
+compileMemory :: Natural -> S.Table -> ModGen AST.Global
+compileMemory index table = globVar
+  where
+    globVar     = do
+      pure $ AST.globalVariableDefaults { Global.name
+                                        , Global.isConstant 
+                                        , Global.type'
+                                        }
+
+    name       = makeName "Memory" index
+    isConstant = True
+    type'      = Type.NamedTypeReference "Memory"
+
+compileTable :: Natural -> S.Table -> ModGen AST.Global
+compileTable index table = globVar
+  where
+    globVar     = do
+      pure $ AST.globalVariableDefaults { Global.name
+                                        , Global.isConstant 
+                                        , Global.type'
+                                        }
+
+    name       = makeName "table" index
+    isConstant = True
+    type'      = Type.NamedTypeReference "Table"
+    
+-- compileElement :: Natural -> S.ElemSegment -> [AST.Instruction]
+-- compileElement index element = do
+--   let offset = AST.Alloca Type.i32 1 4 []
+--   [offset]
+
+-- compileElements :: Natural -> [S.ElemSegment] -> ModGen Global.Global
+-- compileElements index elements = do
+  
 
 
 
 -- TODO: tables, elems
 -- TODO: mems
+
+--  t.load memarg and t.loadN_sx memarg
+
+--  1. Let F be the current frame.
+--  2. Assert: due to validation, F.module.memaddrs[0] exists.
+--  3. Let a be the memory address F.module.memaddrs[0].
+--  4. Assert: due to validation, S.mems[a] exists.
+--  5. Let mem be the memory instance S.mems[a].
+--  6. Assert: due to validation, a value of value type i32 is on the top of the stack.
+--  7. Pop the value i32.const i from the stack.
+--  8. Let ea be the integer i+memarg.offset.
+--  9. If N is not part of the instruction, then:
+--  a. Let N be the bit width |t| of value type t.
+--  10. If ea+N/8 is larger than the length of mem.data, then:
+--  a. Trap.
+--  11. Let b∗ be the byte sequence mem.data[ea:N/8].
+--  12. If N and sx are part of the instruction, then:
+--  a. Let n be the integer for which bytesiN(n)=b∗.
+--  b. Let c be the result of computing extend_sxN,|t|(n).
+--  13. Else:
+--  a. Let c be the constant for which bytest(c)=b∗.
+--  14. Push the value t.const c to the stack.
+
+-- load addr
+-- local.set $x
+
+-- %tmp0 = load ...
+-- %..   = add i32 ... %tmp0
+
+compileMemInstr :: S.BitSize -> LoadMemBuilder -> S.MemArg -> FuncGen [LLVMInstr]
+compileMemInstr bs builder memArg = --addr algn 
+  do
+    addr <- popOperand
+    let algn = fromIntegral $ S.align memArg
+
+    -- generate a new identifier for the intermediate result. In LLVM IR
+    -- this amounts to saving the results to a 'variable.'
+    
+    constructor <- newInstructionConstructor $ iBitSize bs
+    pure [I $ constructor $ builder addr algn]
+
+compileMem2Instr :: S.BitSize -> StoreMemBuilder -> S.MemArg -> FuncGen [LLVMInstr]
+compileMem2Instr bs builder memArg = do
+  val  <- popOperand
+  addr <- popOperand
+  let algn = fromIntegral $ S.align memArg
+  pure [I $ AST.Do $ builder addr val algn]
+
+
 -- TODO: datas
 -- TODO: imports
 -- TODO: exports
@@ -512,17 +631,18 @@ compileModule wasmMod = evalModGen modGen initModEnv
     wasmFuncs           = zip [0..] $ S.functions wasmMod
     modGen              = do
       globals <- traverse (uncurry compileGlobals) wasmGlobals
-      -- tables  <- traverse (uncurry compileTable) wasmTables
+      tables  <- traverse (uncurry compileTable) wasmTables
       defs    <- traverse (uncurry compileFunction) wasmFuncs
       pure $ AST.defaultModule
         { AST.moduleName = "basic",
           AST.moduleDefinitions = 
             (AST.GlobalDefinition <$> (llvmIntrinsics ++ defs)) ++
+            (AST.GlobalDefinition <$> tables) ++
             [
               AST.TypeDefinition "Elem" (Just (AST.StructureType False [Type.i32, Type.ptr (Type.FunctionType Type.void [] False)]))
             , AST.TypeDefinition "Table" (Just (AST.StructureType False [Type.ptr (Type.NamedTypeReference "Elem"), Type.i32, Type.i32]))
             , AST.TypeDefinition "Memory" (Just (AST.StructureType False [Type.ptr Type.i8, Type.i32, Type.i32, Type.i32]))
-            ]
+            ] 
         }
 
 parseModule :: B.ByteString -> Either String S.Module

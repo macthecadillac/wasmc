@@ -283,9 +283,7 @@
     
     (block 
       (loop 
-
         (local.set $x (i32.const 0))
-
         (block 
           (loop
             (call $setCell
