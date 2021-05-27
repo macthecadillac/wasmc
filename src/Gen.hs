@@ -1,9 +1,10 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
 module Gen where
 
-import Control.Applicative ((<|>), Alternative)
+import Control.Applicative
 import qualified Control.Monad.Fail as F
 import Control.Monad.Except
 import Control.Monad.Reader
@@ -39,21 +40,39 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                       }
                      deriving (Show)
 
-newtype ModGen a = ModGen { runModGen :: ExceptT String (Reader ModEnv) a }
-  deriving (Functor, Applicative, MonadPlus, Alternative, Monad, MonadReader ModEnv, MonadError String)
+newtype ModGen a = ModGen { _modGen :: ExceptT String (Reader ModEnv) a }
+  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadError String)
 
-newtype FuncGen a = FuncGen { runFuncGen :: StateT FuncST ModGen a }
-  deriving (Functor, Applicative, MonadPlus, Alternative, Monad, MonadReader ModEnv, F.MonadFail, MonadError String, MonadState FuncST)
+newtype FuncGen a = FuncGen { _funcGen :: StateT FuncST ModGen a }
+  deriving (Functor, Applicative, Monad, MonadReader ModEnv, F.MonadFail, MonadError String, MonadState FuncST)
 
 instance F.MonadFail ModGen where
   fail = liftEither . Left
 
 -- helper functions. Not entirely following Haskell conventions here.
 evalModGen :: ModGen a -> ModEnv -> Either String a
-evalModGen a = runReader (runExceptT (runModGen a))
+evalModGen a = runReader (runExceptT (_modGen a))
 
 evalFuncGen :: FuncGen a -> FuncST -> ModGen a
-evalFuncGen a = evalStateT (runFuncGen a)
+evalFuncGen a = evalStateT (_funcGen a)
+
+runModGen :: ModGen a -> ModEnv -> Either String a
+runModGen a = runReader (runExceptT $ _modGen a)
+
+runFuncGen :: FuncGen a -> FuncST -> ModGen (a, FuncST)
+runFuncGen a = runStateT (_funcGen a)
+
+-- choice with backtracking for stateful functions
+propagateChoice :: (Alternative f, Alternative g) => (f a -> b -> g c) -> f a -> f a -> b -> g c
+propagateChoice f a b s = (f a s) <|> (f b s)
+
+instance Alternative ModGen where
+  empty   = F.fail ""
+  a <|> b = ModGen $ ExceptT $ reader $ propagateChoice runModGen a b
+
+instance Alternative FuncGen where
+  empty   = F.fail ""
+  a <|> b = FuncGen $ StateT $ propagateChoice runFuncGen a b
 
 popScope :: FuncGen ()
 popScope = do
