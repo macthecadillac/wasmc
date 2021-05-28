@@ -301,11 +301,6 @@ compileInstr (S.Call i) = do
       name                         = makeName "func" i
   compileFunctionCall name arguments returnType
 
--- TODO: will need to be modified for multiple returns. Think about the
--- different branches and residual items on the stack before entering each
--- branch
--- TODO: keep track of variable scope like you do for constants. This should
--- solve the problem
 compileInstr S.Return = do
   (phi, term) <- returnOperandStackItems
   blockID     <- makeName "block" . blockIdentifier <$> get
@@ -321,12 +316,12 @@ compileInstr (S.If _ b1 b2) = do
       b2Ident    = makeName "block" $ blockIndx + b1Count + 2
       endIf      = makeName "block" $ blockIndx + b1Count + b2Count + 3
       appendTerm = appendIfLast (not . wasmIsTerm) (S.Br 0)
-  incrBlockIdentifier
   (phiP, operand) <- popOperand
+  incrBlockIdentifier
   pushScope endIf
   thenInstrs      <- branchOperandStack originID b1Ident
   b1Compiled      <- concat <$> traverse compileInstr (appendTerm b1)
-  _               <- moveOperandStack originID b2Ident
+  _               <- moveOperandStack originID b2Ident  -- same instrs as thenInstrs
   b2Compiled      <- concat <$> traverse compileInstr (appendTerm b2)
   popScope
   let instr = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
@@ -347,7 +342,7 @@ compileInstr (S.BrIf i)     = do
   let origin      = makeName "block" blockIndx
       fallthrough = makeName "block" $ blockIndx + 1
   brInstrs        <- branchOperandStack origin dest
-  _               <- moveOperandStack origin fallthrough
+  _               <- moveOperandStack origin fallthrough  -- same instrs as thenInstrs
   incrBlockIdentifier
   pure $ fmap I phiP ++ fmap I brInstrs ++ [T $ AST.Do $ AST.CondBr operand dest fallthrough []]
 
