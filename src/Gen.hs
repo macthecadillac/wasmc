@@ -78,7 +78,9 @@ propagateChoice f a b s = (f a s) <|> (f b s)
 
 instance Alternative ModGen where
   empty   = F.fail ""
-  a <|> b = ModGen $ ExceptT $ reader $ propagateChoice evalModGen a b
+  a <|> b = ModGen $ ExceptT $ reader $ propagateChoice eval a b
+    where
+      eval a r = fst $ runWriter (runReaderT (runExceptT (_modGen a)) r)
 
 instance Alternative FuncGen where
   empty   = F.fail ""
@@ -87,7 +89,7 @@ instance Alternative FuncGen where
 popScope :: FuncGen ()
 popScope = do
   scopeStack <- blockScopeStack <$> get
-  (_, tail)  <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
+  (_, tail)  <- maybe (F.fail "Empty scope stack") pure $ L.uncons scopeStack
   modify $ \st -> st { blockScopeStack = tail }
 
 pushScope :: Name.Name -> FuncGen ()
@@ -96,7 +98,7 @@ pushScope s = modify $ \st -> st { blockScopeStack = s : blockScopeStack st }
 readScope :: Int -> FuncGen Name.Name
 readScope i = do
   scopeStack <- blockScopeStack <$> get
-  maybe (error "Undefined scope") (pure . snd) $ L.find ((i==) . fst) $ zip [0..] scopeStack
+  maybe (F.fail "Undefined scope") (pure . snd) $ L.find ((i==) . fst) $ zip [0..] scopeStack
 
 -- seriously, consider using lens
 unassignConstant :: Name.Name -> FuncGen ()

@@ -271,8 +271,8 @@ compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegr
 compileInstr (S.F32Const n)        = compileConst $ Constant.Float $ Float.Single n
 compileInstr (S.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
 
-compileInstr (S.SetGlobal n)       = error "not implemented: SetGlobal"
-compileInstr (S.TeeLocal n)        = error "not implemented: TeeLocal"
+compileInstr (S.SetGlobal n)       = F.fail "not implemented: SetGlobal"
+compileInstr (S.TeeLocal n)        = F.fail "not implemented: TeeLocal"
 compileInstr (S.SetLocal n)        = do
   -- if there is a constant associated to the variable, remove it
   let ident = makeName "local" n
@@ -281,11 +281,11 @@ compileInstr (S.SetLocal n)        = do
   case a of
     (AST.LocalReference _ name) -> addRenameAction name ident
     (AST.ConstantOperand const) -> assignConstant ident const
-    _                           -> error "unsupported operand"
+    _                           -> F.fail "unsupported operand"
   tell ["    emit: " ++ show phi]
   pure $ I <$> phi
 
-compileInstr (S.GetGlobal n)       = error "not implemented: GetGlobal"
+compileInstr (S.GetGlobal n)       = F.fail "not implemented: GetGlobal"
 
 -- `<|>` is the choice operator. It tries the first branch, and if it fails,
 -- goes on to try the second branch.
@@ -303,7 +303,7 @@ compileInstr (S.GetLocal n)        = const <|> ref
       varType     <- withMsg $ M.lookup name localVariableTypes
       constants   <- withMsg $ M.lookup name localConst
       let outofblockInstr = case M.assocs constants of
-                              []       -> error "no constants found"
+                              []       -> F.fail "no constants found"
                               [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
                               l        -> do constructor <- newInstructionConstructor varType
                                              let operand = first AST.ConstantOperand . swap <$> l
@@ -431,7 +431,7 @@ compileInstr (S.I64Store memArg) = compileMem2Instr S.BS64 boomwi memArg
 -- compileInstr (S.I64Store16 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
 -- compileInstr (S.I64Store32 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
 
-compileInstr instr = error $ "not implemented: " ++ show instr
+compileInstr instr = F.fail $ "not implemented: " ++ show instr
 
 
 compileType :: S.ValueType -> Type.Type
@@ -468,7 +468,7 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
       tell ["func def: " ++ show indx]
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
-      let FT { arguments, returnType } = functionTypes M.! (S.funcType func)
+      let FT { arguments, returnType } = functionTypes M.! indx
           paramList  = do
             (i, t) <- zip [0..] arguments
             pure $ Global.Parameter t (makeName "local" i) []
@@ -648,7 +648,8 @@ compileModule :: S.Module -> Either String AST.Module
 compileModule wasmMod = evalModGen modGen initModEnv
   where
     startFunctionIndex  = (\(S.StartFunction n) -> n) <$> S.start wasmMod
-    functionTypes       = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
+    extractFuncType     = compileFunctionType . (S.types wasmMod !!) . fromIntegral . S.funcType
+    functionTypes       = M.fromList $ zip [0..] $ fmap extractFuncType $ S.functions wasmMod
     initModEnv          = ModEnv startFunctionIndex functionTypes
     wasmGlobals         = zip [0..] $ S.globals wasmMod
     wasmTables          = zip [0..] $ S.tables wasmMod
