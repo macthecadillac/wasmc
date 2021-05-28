@@ -35,7 +35,7 @@ import qualified LLVM.AST.Type as Type
 import Intrinsics
 import Gen
 import Numeric.Natural
-import Utils (appendIfLast, makeName, splitAfter, unsnoc)
+import Utils (appendIfLast, makeName, splitAfter, unsnoc, operandType)
 import qualified LLVM.AST as AST.Instruction
 
 type BOI    = Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
@@ -103,13 +103,6 @@ fBitSize :: S.BitSize -> Type.Type
 fBitSize S.BS32 = Type.float
 fBitSize S.BS64 = Type.double
 
-operandType :: AST.Operand -> Type.Type
-operandType (AST.LocalReference t _) = t
-operandType (AST.ConstantOperand (Constant.Int bs _)) = Type.IntegerType bs
-operandType (AST.ConstantOperand (Constant.Float (Float.Single _))) = Type.FloatingPointType Type.FloatFP
-operandType (AST.ConstantOperand (Constant.Float (Float.Double _))) = Type.FloatingPointType Type.DoubleFP
-operandType t = error $ "Not a recognized type: " ++ show t
-
 -- check if a wasm instruction will be compiled to a terminator in LLVM
 wasmIsTerm :: S.Instruction a -> Bool
 wasmIsTerm S.Unreachable = True
@@ -141,38 +134,26 @@ compileConst const = (pushOperand $ AST.ConstantOperand const) $> []
 
 compileBinOp :: BinOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
 compileBinOp builder op t = do
-  b          <- popOperand
-  a          <- popOperand
+  (phiB, b)   <- popOperand
+  (phiA, a)   <- popOperand
   -- generate a new identifier for the intermediate result. In LLVM IR
   -- this amounts to saving the results to a 'variable.'
   constructor <- newInstructionConstructor t
-  pure [I $ constructor $ builder op a b]
+  pure $ fmap I $ phiB ++ phiA ++ [constructor $ builder op a b]
 
 compileUnOp :: UnOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
 compileUnOp builder op t = do
-  a          <- popOperand
+  (instr, a)  <- popOperand
   constructor <- newInstructionConstructor t
-  pure [I $ constructor $ builder op a]
+  pure $ fmap I $ instr ++ [constructor $ builder op a]
 
 compileCmpOp :: POOI p -> p -> FuncGen [LLVMInstr]
 compileCmpOp cmp pred = do
-  b          <- popOperand
-  a          <- popOperand
+  (phiB, b)   <- popOperand
+  (phiA, a)   <- popOperand
   -- comparison operators return i1 sized booleans
   constructor <- newInstructionConstructor Type.i1
-  pure [I $ constructor $ pooi cmp pred a b]
-
-compilefMinMax :: S.BitSize -> S.FRelOp -> FuncGen [LLVMInstr]
-compilefMinMax bs pred = do
-  b     <- popOperand
-  a     <- popOperand
-  pushOperand a
-  pushOperand b
-  pushOperand a
-  pushOperand b
-  bool  <- compileInstr (S.FRelOp bs pred)
-  instr <- compileInstr S.Select
-  pure $ bool ++ instr
+  pure $ fmap I $ phiB ++ phiA ++ [constructor $ pooi cmp pred a b]
 
 compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> FuncGen [LLVMInstr]
 compileFunctionCall name arguments returnType = do
@@ -183,11 +164,12 @@ compileFunctionCall name arguments returnType = do
   -- pop the required number of operands off the `operandStack` and
   -- collect the results into a list. `replicateM` deals with the
   -- FuncGen monad.
-  args       <- replicateM (fromIntegral nArgs) popOperand
-  let arguments = reverse [(operand, []) | operand <- args]
-      instr     = AST.Call Nothing Conv.C [] (Right function) arguments [] []
+  ops       <- replicateM (fromIntegral nArgs) popOperand
+  let (phis, args) = unzip ops
+      arguments    = reverse [(operand, []) | operand <- args]
+      instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
   constructor <- newInstructionConstructor returnType
-  pure [I $ constructor instr]
+  pure $ fmap I $ concat phis ++ [constructor instr]
 
 callIntrinsics :: String -> FuncGen [LLVMInstr]
 callIntrinsics name = do
@@ -251,10 +233,10 @@ compileInstr (S.FBinOp bs S.FAdd)  = compileBinOp fooi AST.FAdd $ fBitSize bs
 compileInstr (S.FBinOp bs S.FSub)  = compileBinOp fooi AST.FSub $ fBitSize bs
 compileInstr (S.FBinOp bs S.FMul)  = compileBinOp fooi AST.FMul $ fBitSize bs
 compileInstr (S.FBinOp bs S.FDiv)  = compileBinOp fooi AST.FDiv $ fBitSize bs
-compileInstr (S.FBinOp bs S.FMin)  = compilefMinMax bs S.FLt
-compileInstr (S.FBinOp bs S.FMax)  = compilefMinMax bs S.FGt
+compileInstr (S.FBinOp bs S.FMin)  = callIntrinsics $ "llvm.minnum.f" ++ sBitSize bs
+compileInstr (S.FBinOp bs S.FMax)  = callIntrinsics $ "llvm.maxnum.f" ++ sBitSize bs
 -- value of the first argument, sign of the second argument
--- compileInstr (S.FBinOp bs S.FCopySign) = compileBinOp booi  AST.SDiv $ Type.IntegerType $ iBitSize bs
+compileInstr (S.FBinOp bs S.FCopySign) = callIntrinsics $ "llvm.copysign.f" ++ sBitSize bs
 
 compileInstr (S.FRelOp _  S.FEq)   = compileCmpOp AST.FCmp FPred.OEQ
 compileInstr (S.FRelOp _  S.FNe)   = compileCmpOp AST.FCmp FPred.ONE
@@ -264,11 +246,11 @@ compileInstr (S.FRelOp _  S.FLe)   = compileCmpOp AST.FCmp FPred.OLE
 compileInstr (S.FRelOp _  S.FGe)   = compileCmpOp AST.FCmp FPred.OGE
 
 compileInstr S.Select              = do
-  cond        <- popOperand
-  false       <- popOperand
-  true        <- popOperand
-  constructor <- newInstructionConstructor $ operandType true
-  pure [I $ constructor $ AST.Select cond true false []]
+  (phiC, cond)  <- popOperand
+  (phiF, false) <- popOperand
+  (phiT, true)  <- popOperand
+  constructor   <- newInstructionConstructor $ operandType true
+  pure $ fmap I $ phiC ++ phiF ++ phiT ++ [constructor $ AST.Select cond true false []]
 
 compileInstr (S.I32Const n)        = compileConst $ Constant.Int 32 $ fromIntegral n
 compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegral n
@@ -281,15 +263,15 @@ compileInstr (S.SetLocal n)        = do
   -- if there is a constant associated to the variable, remove it
   let ident = makeName "local" n
   unassignConstant ident
-  a <- popOperand
+  (phi, a) <- popOperand
   case a of
-    (AST.LocalReference _ name) -> addRenameAction name ident $> []
-    (AST.ConstantOperand const) -> assignConstant ident const $> []
+    (AST.LocalReference _ name) -> addRenameAction name ident
+    (AST.ConstantOperand const) -> assignConstant ident const
     _                           -> error "unsupported operand"
+  pure $ I <$> phi
 
 compileInstr (S.GetGlobal n)       = error "not implemented: GetGlobal"
 
--- A bit dangerous, but should work since it fails before it gets to push/pop
 -- `<|>` is the choice operator. It tries the first branch, and if it fails,
 -- goes on to try the second branch.
 compileInstr (S.GetLocal n)        = const <|> ref
@@ -320,42 +302,54 @@ compileInstr (S.Call i) = do
   compileFunctionCall name arguments returnType
 
 -- TODO: will need to be modified for multiple returns. Think about the
--- difference branches and residual items on the stack before entering each
+-- different branches and residual items on the stack before entering each
 -- branch
 -- TODO: keep track of variable scope like you do for constants. This should
 -- solve the problem
-compileInstr S.Return = pure . T <$> returnOperandStackItems
+compileInstr S.Return = do
+  (phi, term) <- returnOperandStackItems
+  blockID     <- makeName "block" . blockIdentifier <$> get
+  deleteOperandStack blockID
+  pure $ (I <$> phi) ++ [T term]
 
 compileInstr (S.If _ b1 b2) = do
   blockIndx <- blockIdentifier <$> get
   let b1Count    = countTerminals b1
       b2Count    = countTerminals b2
+      originID   = makeName "block" blockIndx
       b1Ident    = makeName "block" $ blockIndx + 1
       b2Ident    = makeName "block" $ blockIndx + b1Count + 2
       endIf      = makeName "block" $ blockIndx + b1Count + b2Count + 3
       appendTerm = appendIfLast (not . wasmIsTerm) (S.Br 0)
-  modify (\st -> st { blockIdentifier = blockIndx + 1 })
-  operand    <- popOperand
+  incrBlockIdentifier
+  (phiP, operand) <- popOperand
   pushScope endIf
-  b1Compiled <- concat <$> traverse compileInstr (appendTerm b1)
-  b2Compiled <- concat <$> traverse compileInstr (appendTerm b2)
+  thenInstrs      <- branchOperandStack originID b1Ident
+  b1Compiled      <- concat <$> traverse compileInstr (appendTerm b1)
+  _               <- moveOperandStack originID b2Ident
+  b2Compiled      <- concat <$> traverse compileInstr (appendTerm b2)
   popScope
   let instr = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
-  pure $ instr : b1Compiled ++ b2Compiled
+  pure $ fmap I phiP ++ fmap I thenInstrs ++ [instr] ++ b1Compiled ++ b2Compiled
 
 -- the index here is the levels of scopes. It's a WASM peculiarity
 compileInstr (S.Br i)       = do
-  dest <- readScope $ fromIntegral i
-  modify (\st -> st { blockIdentifier = blockIdentifier st + 1 })
-  pure [T $ AST.Do $ AST.Br dest []]
+  origin   <- makeName "block" . blockIdentifier <$> get
+  dest     <- readScope $ fromIntegral i
+  brInstrs <- moveOperandStack origin dest
+  incrBlockIdentifier
+  pure $ fmap I brInstrs ++ [T $ AST.Do $ AST.Br dest []]
 
 compileInstr (S.BrIf i)     = do
-  blockIndx <- blockIdentifier <$> get
-  dest      <- readScope $ fromIntegral i
-  operand   <- popOperand
-  let fallthrough = makeName "block" $ blockIndx + 1
-  modify (\st -> st { blockIdentifier = blockIdentifier st + 1 })
-  pure [T $ AST.Do $ AST.CondBr operand dest fallthrough []]
+  blockIndx       <- blockIdentifier <$> get
+  dest            <- readScope $ fromIntegral i
+  (phiP, operand) <- popOperand
+  let origin      = makeName "block" blockIndx
+      fallthrough = makeName "block" $ blockIndx + 1
+  brInstrs        <- branchOperandStack origin dest
+  _               <- moveOperandStack origin fallthrough
+  incrBlockIdentifier
+  pure $ fmap I phiP ++ fmap I brInstrs ++ [T $ AST.Do $ AST.CondBr operand dest fallthrough []]
 
 compileInstr (S.Block _ body) = do
   blockIndx <- blockIdentifier <$> get
@@ -432,7 +426,7 @@ compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalFuncGen funcGen initFuncST
   where
-    initFuncST = FuncST [] 0 0 [] M.empty M.empty M.empty
+    initFuncST = FuncST M.empty 0 0 [] M.empty M.empty M.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     -- split the list of `LLVMObj` into blocks by looking for terminators. The
@@ -457,14 +451,14 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
           localVariables = do
             (n, t) <- zip [0..] $ arguments ++ localTypes
             pure (makeName "local" n, t)
-      modify (\st -> st { localVariableTypes = M.fromAscList localVariables })
+      modify $ \st -> st { localVariableTypes = M.fromAscList localVariables }
       -- compile basic blocks and collect the results
-      instrs       <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
-      llvmInstrs   <- renameInstrs instrs
-      remainingOps <- operandStack <$> get
-      returnInstr  <- returnOperandStackItems
+      instrs              <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
+      llvmInstrs          <- renameInstrs instrs
+      (phis, returnInstr) <- returnOperandStackItems
       let blks = splitAfter isTerm
-               $ appendIfLast (not . isRet) (T returnInstr) llvmInstrs
+               $ appendIfLast (not . isRet) (T returnInstr)
+               $ llvmInstrs ++ fmap I phis
           -- TODO: conditional additional block if the last item is a block and
           -- requested a jump to an additional block
           basicBlocks = fmap (buildBlock . assignName)
@@ -600,21 +594,21 @@ compileTable index table = globVar
 compileMemInstr :: S.BitSize -> LoadMemBuilder -> S.MemArg -> FuncGen [LLVMInstr]
 compileMemInstr bs builder memArg = --addr algn 
   do
-    addr <- popOperand
+    (phi, addr) <- popOperand
     let algn = fromIntegral $ S.align memArg
 
     -- generate a new identifier for the intermediate result. In LLVM IR
     -- this amounts to saving the results to a 'variable.'
     
     constructor <- newInstructionConstructor $ iBitSize bs
-    pure [I $ constructor $ builder addr algn]
+    pure $ fmap I $ phi ++ [constructor $ builder addr algn]
 
 compileMem2Instr :: S.BitSize -> StoreMemBuilder -> S.MemArg -> FuncGen [LLVMInstr]
 compileMem2Instr bs builder memArg = do
-  val  <- popOperand
-  addr <- popOperand
+  (phiV, val)  <- popOperand
+  (phiA, addr) <- popOperand
   let algn = fromIntegral $ S.align memArg
-  pure [I $ AST.Do $ builder addr val algn]
+  pure $ fmap I $ phiV ++ phiA ++ [AST.Do $ builder addr val algn]
 
 
 -- TODO: datas

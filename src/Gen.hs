@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -5,6 +6,7 @@
 module Gen where
 
 import Control.Applicative
+import Control.Arrow
 import qualified Control.Monad.Fail as F
 import Control.Monad.Except
 import Control.Monad.Reader
@@ -12,21 +14,28 @@ import Control.Monad.State.Lazy
 import qualified Data.Map as M
 import Data.Maybe
 import qualified Data.List as L
+import Data.Tuple
 import qualified LLVM.AST as AST
 import qualified LLVM.AST.Constant as Constant
 import qualified LLVM.AST.Operand as Op
 import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Type as Type
 import Numeric.Natural
-import Utils (makeName)
+import Utils (makeName, operandType)
+
+type NestedMap a = M.Map Name.Name (M.Map Name.Name a)
+
+data OperandStack = OpS { currentBlock :: [AST.Operand]
+                        , previousBlocks :: (M.Map Name.Name [AST.Operand]) }
+                        deriving (Show)
 
 -- a record for per-function state variables
-data FuncST = FuncST { operandStack :: [AST.Operand]
+data FuncST = FuncST { operandStack :: M.Map Name.Name OperandStack -- stack of operands associated to a block
                      , localIdentifier :: Natural
                      , blockIdentifier :: Natural
                      , blockScopeStack :: [Name.Name]
                      , renameMap :: M.Map Name.Name Name.Name
-                     , localConst :: M.Map Name.Name (M.Map Name.Name Constant.Constant)  -- the constants associated with the identifier of the incoming block
+                     , localConst :: NestedMap Constant.Constant  -- the constants associated with the identifier of the incoming block
                      , localVariableTypes :: M.Map Name.Name Type.Type }
                      deriving (Show)
 
@@ -78,10 +87,10 @@ popScope :: FuncGen ()
 popScope = do
   scopeStack <- blockScopeStack <$> get
   (_, tail)  <- maybe (error "Empty scope stack") pure $ L.uncons scopeStack
-  modify (\st -> st { blockScopeStack = tail })
+  modify $ \st -> st { blockScopeStack = tail }
 
 pushScope :: Name.Name -> FuncGen ()
-pushScope s = modify (\st -> st { blockScopeStack = s : blockScopeStack st })
+pushScope s = modify $ \st -> st { blockScopeStack = s : blockScopeStack st }
 
 readScope :: Int -> FuncGen Name.Name
 readScope i = do
@@ -107,30 +116,114 @@ assignConstant name const = do
 
 addRenameAction :: Name.Name -> Name.Name -> FuncGen ()
 addRenameAction name newName =
-  modify (\st -> st { renameMap = M.insert name newName $ renameMap st })
+  modify $ \st -> st { renameMap = M.insert name newName $ renameMap st }
 
 -- pop operand off the `operandStack`
 -- the rename action here should always be valid because of SSA and because we
 -- do not reuse identifiers
-popOperand :: FuncGen AST.Operand
+popOperand :: FuncGen ([AST.Named AST.Instruction], AST.Operand)
 popOperand = do
-  stack      <- operandStack <$> get
-  (op, rest) <- maybe (F.fail "not enough operands") pure $ L.uncons stack
-  operand    <- rename op <$> get
-  modify (\st -> st { operandStack = rest })
-  pure operand
+  FuncST { operandStack, renameMap, blockIdentifier } <- get
+  let blockID = makeName "block" blockIdentifier
+  localStack <- liftMaybe $ M.lookup blockID operandStack
+  (op, rest) <- liftMaybe $ uncons blockID localStack
+  let operands = rename <$> op <*> pure renameMap
+  modify $ \st -> st { operandStack = M.insert blockID rest operandStack }
+  combine operands
     where
-      rename (Op.LocalReference t name) = Op.LocalReference t . fromMaybe name . M.lookup name . renameMap
-      rename op                         = const op
+      liftMaybe = maybe (F.fail "not enough operands") pure
+
+      uncons _ (OpS [] map) = do
+        unconned <- sequenceA $ L.uncons <$> map
+        let ops  = M.toList $ fst <$> unconned
+            rest = M.filter (not . null) $ snd <$> unconned
+        pure (ops, OpS [] rest)
+      uncons blockID (OpS stack map) = do
+        (op, rest) <- L.uncons stack
+        pure ([(blockID, op)], OpS rest map)
+
+      rename (block, op) m = (re op m, block)
+      re (Op.LocalReference t name) = Op.LocalReference t . fromMaybe name . M.lookup name
+      re op                         = const op
+
+      combine []             = error "impossible branch"
+      combine [(x, _)]       = pure ([], x)
+      combine ops@((x, _):_) = do
+        n <- localIdentifier <$> get
+        let opType = operandType x
+            ident  = makeName "tmp" n
+            instr  = ident AST.:= AST.Phi opType ops []
+            op     = AST.LocalReference opType ident
+        incrLocalIdentifier
+        pure ([instr], op)
 
 pushOperand :: AST.Operand -> FuncGen ()
-pushOperand op = modify (\st -> st { operandStack = op : operandStack st })
+pushOperand op = do
+  FuncST { operandStack, blockIdentifier } <- get
+  let blockID       = makeName "block" blockIdentifier
+      OpS stack map = fromMaybe (OpS [] M.empty) $ M.lookup blockID operandStack
+  modify $ \st -> st { operandStack = M.insert blockID (OpS (op:stack) map) operandStack }
 
 pushOperands :: [AST.Operand] -> FuncGen ()
 pushOperands = mapM_ pushOperand
 
+deleteOperandStack :: Name.Name -> FuncGen ()
+deleteOperandStack name = do
+  st@FuncST { operandStack } <- get
+  put $ st { operandStack = M.delete name operandStack }
+
+branchOperandStack :: Name.Name -> Name.Name -> FuncGen ([AST.Named AST.Instruction])
+branchOperandStack origin dest = do
+  FuncST { operandStack, localIdentifier } <- get
+  let originStack  = fromMaybe (OpS [] M.empty) $ M.lookup origin operandStack
+      (OpS st m)   = fromMaybe (OpS [] M.empty) $ M.lookup dest operandStack
+  (n, instrs, ops) <- liftEither $ collapseStacks localIdentifier originStack
+  let destStack    = OpS st $ M.insert origin ops m
+  modify $ \st -> st { operandStack = M.insert dest destStack operandStack
+                     , localIdentifier = n }
+  pure instrs
+
+moveOperandStack :: Name.Name -> Name.Name -> FuncGen ([AST.Named AST.Instruction])
+moveOperandStack origin dest = do
+  instrs <- branchOperandStack origin dest
+  deleteOperandStack origin
+  pure instrs
+
+collapseStacks :: Natural -> OperandStack -> Either String (Natural, [AST.Named AST.Instruction], [AST.Operand])
+collapseStacks n (OpS stack map) = do
+  stacks <- transpose $ toTupleList map
+  let (combined, n')     = runState (traverse combine $ stacks) n
+      (instrs, operands) = unzip combined
+  pure (n', instrs, stack ++ operands)
+    where
+      combine []                 = error "empty sub-stack"
+      combine ops@((fstOp, _):_) = do
+        n <- get
+        let ident  = makeName "tmp" n
+            opType = operandType fstOp
+            instr  = ident AST.:= AST.Phi opType ops []
+            newOp  = AST.LocalReference opType ident
+        modify (+1)
+        pure (instr, newOp)
+
+      transpose ls | sameLength ls = Right $ L.transpose ls
+                   | otherwise     = Left "stacks of different branches have difference sizes"
+
+      sameLength []     = True
+      sameLength (x:xs) = isJust $ foldM eq (length x) $ fmap length xs
+      a `eq` b | a == b    = Just b
+               | otherwise = Nothing
+
+      toTupleList map = do
+        (name, ops) <- M.toList map
+        pure [(op, name) | op <- ops]
+
+
+incrBlockIdentifier :: FuncGen ()
+incrBlockIdentifier = modify $ \st -> st { blockIdentifier = blockIdentifier st + 1 }
+
 incrLocalIdentifier :: FuncGen ()
-incrLocalIdentifier = modify (\st -> st { localIdentifier = localIdentifier st + 1 })
+incrLocalIdentifier = modify $ \st -> st { localIdentifier = localIdentifier st + 1 }
 
 -- create a new identifier, put the identifier on the `operandStack` and
 -- increment the global identifier tracker
@@ -144,14 +237,15 @@ newInstructionConstructor idType        = do
   incrLocalIdentifier
   pure (name AST.:=)
 
-returnOperandStackItems :: FuncGen (AST.Named AST.Terminator)
+returnOperandStackItems :: FuncGen ([AST.Named AST.Instruction], AST.Named AST.Terminator)
 returnOperandStackItems = do
-  FuncST { operandStack } <- get
-  let ret = do guard $ not $ L.null operandStack
-               pure $ packValues operandStack
-  modify (\env -> env { operandStack = [] })
-  pure $ AST.Do $ AST.Ret ret []
+  FuncST { operandStack, blockIdentifier, localIdentifier } <- get
+  let blockID    = makeName "block" blockIdentifier
+      localStack = fromMaybe (OpS [] M.empty) $ M.lookup blockID operandStack
+  (n, instrs, ops) <- liftEither $ collapseStacks localIdentifier localStack
+  modify $ \st -> st { localIdentifier = n }
+  pure (instrs, AST.Do $ AST.Ret (collapseOps ops) [])
     where
-      packValues []  = AST.LocalReference Type.VoidType "void"
-      packValues [x] = x
-      packValues l   = error "add support for multiple return vals"  -- TODO: support multiple return values
+      collapseOps []  = Nothing
+      collapseOps [x] = Just x
+      collapseOps _   = error "multiple ret vals not implemented"

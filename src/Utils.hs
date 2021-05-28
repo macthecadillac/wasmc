@@ -7,7 +7,11 @@ import Data.ByteString.Lazy.Char8 (pack)
 import Data.ByteString.Short.Internal (ShortByteString, toShort)
 import qualified Data.List as L
 import Data.Tuple (swap)
+import LLVM.AST
+import LLVM.AST.Constant
+import LLVM.AST.Float
 import LLVM.AST.Name
+import LLVM.AST.Type
 import Numeric.Natural
 
 appendIfLast :: (a -> Bool) -> a -> [a] -> [a]
@@ -31,3 +35,10 @@ makeName s = mkName . (s++) . show
 
 unsnoc :: [a] -> Maybe (a, [a])
 unsnoc = fmap (second L.reverse) . L.uncons . L.reverse
+
+operandType :: Operand -> Type
+operandType (LocalReference t _) = t
+operandType (ConstantOperand (Int bs _)) = IntegerType bs
+operandType (ConstantOperand (Float (Single _))) = FloatingPointType FloatFP
+operandType (ConstantOperand (Float (Double _))) = FloatingPointType DoubleFP
+operandType t = error $ "Not a recognized type: " ++ show t

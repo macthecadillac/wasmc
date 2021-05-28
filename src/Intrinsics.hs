@@ -33,6 +33,12 @@ llvmIntrinsicsTypes = M.fromList [("llvm.fabs.f32", FT [Type.float] Type.float)
                                  ,("llvm.roundeven.f64", FT [Type.double] Type.double)
                                  ,("llvm.sqrt.f32", FT [Type.float] Type.float)
                                  ,("llvm.sqrt.f64", FT [Type.double] Type.double)
+                                 ,("llvm.minnum.f32", FT [Type.float, Type.float] Type.float)
+                                 ,("llvm.minnum.f64", FT [Type.double, Type.double] Type.double)
+                                 ,("llvm.maxnum.f32", FT [Type.float, Type.float] Type.float)
+                                 ,("llvm.maxnum.f64", FT [Type.double, Type.double] Type.double)
+                                 ,("llvm.copysign.f32", FT [Type.float, Type.float] Type.float)
+                                 ,("llvm.copysign.f64", FT [Type.double, Type.double] Type.double)
                                  ]
 
 -- declarations of LLVM intrinsic functions
