@@ -6,11 +6,12 @@
 module Gen where
 
 import Control.Applicative
-import Control.Arrow
 import qualified Control.Monad.Fail as F
 import Control.Monad.Except
 import Control.Monad.Reader
-import Control.Monad.State.Lazy
+import Control.Monad.State
+import Control.Monad.Writer
+import Data.Bifunctor
 import qualified Data.Map as M
 import Data.Maybe
 import qualified Data.List as L
@@ -21,7 +22,7 @@ import qualified LLVM.AST.Operand as Op
 import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Type as Type
 import Numeric.Natural
-import Utils (makeName, operandType)
+import Utils (makeName, operandType, toLog)
 
 type NestedMap a = M.Map Name.Name (M.Map Name.Name a)
 
@@ -49,24 +50,24 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                       }
                      deriving (Show)
 
-newtype ModGen a = ModGen { _modGen :: ExceptT String (Reader ModEnv) a }
-  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadError String)
+newtype ModGen a = ModGen { _modGen :: ExceptT String (ReaderT ModEnv (Writer [String])) a }
+  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadWriter [String], MonadError String)
 
 newtype FuncGen a = FuncGen { _funcGen :: StateT FuncST ModGen a }
-  deriving (Functor, Applicative, Monad, MonadReader ModEnv, F.MonadFail, MonadError String, MonadState FuncST)
+  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadWriter [String], F.MonadFail, MonadError String, MonadState FuncST)
 
 instance F.MonadFail ModGen where
   fail = liftEither . Left
 
 -- helper functions. Not entirely following Haskell conventions here.
 evalModGen :: ModGen a -> ModEnv -> Either String a
-evalModGen a = runReader (runExceptT (_modGen a))
+evalModGen a r = first (\e -> "Error: " ++ e ++ log) val
+  where
+    log = "\n\nLog:\n" ++ (L.concat $ L.intersperse "\n" logLines) ++ "\n<---Error"
+    (val, logLines) = runWriter (runReaderT (runExceptT (_modGen a)) r)
 
 evalFuncGen :: FuncGen a -> FuncST -> ModGen a
 evalFuncGen a = evalStateT (_funcGen a)
-
-runModGen :: ModGen a -> ModEnv -> Either String a
-runModGen a = runReader (runExceptT $ _modGen a)
 
 runFuncGen :: FuncGen a -> FuncST -> ModGen (a, FuncST)
 runFuncGen a = runStateT (_funcGen a)
@@ -77,7 +78,7 @@ propagateChoice f a b s = (f a s) <|> (f b s)
 
 instance Alternative ModGen where
   empty   = F.fail ""
-  a <|> b = ModGen $ ExceptT $ reader $ propagateChoice runModGen a b
+  a <|> b = ModGen $ ExceptT $ reader $ propagateChoice evalModGen a b
 
 instance Alternative FuncGen where
   empty   = F.fail ""
@@ -127,17 +128,21 @@ popOperand = do
   let blockID = makeName "block" blockIdentifier
   localStack <- liftMaybe $ M.lookup blockID operandStack
   (op, rest) <- liftMaybe $ uncons blockID localStack
-  let operands = rename <$> op <*> pure renameMap
+  let operands = flip rename renameMap <$> op
   modify $ \st -> st { operandStack = M.insert blockID rest operandStack }
-  combine operands
+  (instrs, op) <- combine operands
+  tell $ toLog "    pop operand--emit: " instrs
+  tell $ toLog "    pop operand--op: " [op]
+  pure (instrs, op)
     where
       liftMaybe = maybe (F.fail "not enough operands") pure
 
-      uncons _ (OpS [] map) = do
-        unconned <- sequenceA $ L.uncons <$> map
-        let ops  = M.toList $ fst <$> unconned
-            rest = M.filter (not . null) $ snd <$> unconned
-        pure (ops, OpS [] rest)
+      uncons _ (OpS [] map)
+        | null map  = Nothing
+        | otherwise = do unconned <- sequenceA $ L.uncons <$> map
+                         let ops  = M.toList $ fst <$> unconned
+                             rest = M.filter (not . null) $ snd <$> unconned
+                         pure (ops, OpS [] rest)
       uncons blockID (OpS stack map) = do
         (op, rest) <- L.uncons stack
         pure ([(blockID, op)], OpS rest map)
@@ -159,6 +164,7 @@ popOperand = do
 
 pushOperand :: AST.Operand -> FuncGen ()
 pushOperand op = do
+  tell $ toLog "    push operand: " [op]
   FuncST { operandStack, blockIdentifier } <- get
   let blockID       = makeName "block" blockIdentifier
       OpS stack map = fromMaybe (OpS [] M.empty) $ M.lookup blockID operandStack

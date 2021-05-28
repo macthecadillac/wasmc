@@ -5,7 +5,8 @@ module Lib where
 
 import Control.Applicative ((<|>))
 import Control.Monad.Reader
-import Control.Monad.State.Lazy
+import Control.Monad.State
+import Control.Monad.Writer
 import qualified Control.Monad.Fail as F
 import Data.Bifunctor
 import qualified Data.ByteString.Lazy as B
@@ -35,7 +36,7 @@ import qualified LLVM.AST.Type as Type
 import Intrinsics
 import Gen
 import Numeric.Natural
-import Utils (appendIfLast, makeName, splitAfter, unsnoc, operandType)
+import Utils (appendIfLast, makeName, splitAfter, unsnoc, operandType, toLog)
 import qualified LLVM.AST as AST.Instruction
 
 type BOI    = Bool -> AST.Operand -> AST.InstructionMetadata -> AST.Instruction
@@ -130,7 +131,10 @@ countTerminals = sum . fmap aux
                       | otherwise = 0
 
 compileConst :: Constant.Constant -> FuncGen [LLVMInstr]
-compileConst const = (pushOperand $ AST.ConstantOperand const) $> []
+compileConst const = do
+  tell $ toLog "    constant: " [const]
+  pushOperand $ AST.ConstantOperand const
+  pure []
 
 compileBinOp :: BinOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
 compileBinOp builder op t = do
@@ -139,13 +143,17 @@ compileBinOp builder op t = do
   -- generate a new identifier for the intermediate result. In LLVM IR
   -- this amounts to saving the results to a 'variable.'
   constructor <- newInstructionConstructor t
-  pure $ fmap I $ phiB ++ phiA ++ [constructor $ builder op a b]
+  let instrs = phiB ++ phiA ++ [constructor $ builder op a b]
+  tell $ toLog "    emit: " instrs
+  pure $ fmap I instrs
 
 compileUnOp :: UnOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
 compileUnOp builder op t = do
-  (instr, a)  <- popOperand
+  (phi, a)  <- popOperand
   constructor <- newInstructionConstructor t
-  pure $ fmap I $ instr ++ [constructor $ builder op a]
+  let instrs = phi ++ [constructor $ builder op a]
+  tell $ toLog "    emit: " instrs
+  pure $ fmap I instrs
 
 compileCmpOp :: POOI p -> p -> FuncGen [LLVMInstr]
 compileCmpOp cmp pred = do
@@ -153,7 +161,9 @@ compileCmpOp cmp pred = do
   (phiA, a)   <- popOperand
   -- comparison operators return i1 sized booleans
   constructor <- newInstructionConstructor Type.i1
-  pure $ fmap I $ phiB ++ phiA ++ [constructor $ pooi cmp pred a b]
+  let instrs = phiB ++ phiA ++ [constructor $ pooi cmp pred a b]
+  tell $ toLog "    emit: " instrs
+  pure $ fmap I instrs
 
 compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> FuncGen [LLVMInstr]
 compileFunctionCall name arguments returnType = do
@@ -169,7 +179,9 @@ compileFunctionCall name arguments returnType = do
       arguments    = reverse [(operand, []) | operand <- args]
       instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
   constructor <- newInstructionConstructor returnType
-  pure $ fmap I $ concat phis ++ [constructor instr]
+  let instrs = concat phis ++ [constructor instr]
+  tell $ toLog "    call-emit: " instrs
+  pure $ fmap I instrs
 
 callIntrinsics :: String -> FuncGen [LLVMInstr]
 callIntrinsics name = do
@@ -250,7 +262,9 @@ compileInstr S.Select              = do
   (phiF, false) <- popOperand
   (phiT, true)  <- popOperand
   constructor   <- newInstructionConstructor $ operandType true
-  pure $ fmap I $ phiC ++ phiF ++ phiT ++ [constructor $ AST.Select cond true false []]
+  let instrs = phiC ++ phiF ++ phiT ++ [constructor $ AST.Select cond true false []]
+  tell $ toLog "    emit: " instrs
+  pure $ fmap I instrs
 
 compileInstr (S.I32Const n)        = compileConst $ Constant.Int 32 $ fromIntegral n
 compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegral n
@@ -268,6 +282,7 @@ compileInstr (S.SetLocal n)        = do
     (AST.LocalReference _ name) -> addRenameAction name ident
     (AST.ConstantOperand const) -> assignConstant ident const
     _                           -> error "unsupported operand"
+  tell ["    emit: " ++ show phi]
   pure $ I <$> phi
 
 compileInstr (S.GetGlobal n)       = error "not implemented: GetGlobal"
@@ -292,7 +307,9 @@ compileInstr (S.GetLocal n)        = const <|> ref
                               [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
                               l        -> do constructor <- newInstructionConstructor varType
                                              let operand = first AST.ConstantOperand . swap <$> l
-                                             pure [I $ constructor $ AST.Phi varType operand []]
+                                                 instrs  = [constructor $ AST.Phi varType operand []]
+                                             tell $ toLog "    emit: " instrs
+                                             pure $ I <$> instrs
           inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
           blockID         = makeName "block" blockIdentifier
       maybe outofblockInstr inblockInstr $ M.lookup blockID constants
@@ -308,6 +325,8 @@ compileInstr S.Return = do
   blockID     <- makeName "block" . blockIdentifier <$> get
   deleteOperandStack blockID
   incrBlockIdentifier
+  tell $ toLog "    return-emit: " phi
+  tell $ toLog "    return-term: " [term]
   pure $ (I <$> phi) ++ [T term]
 
 compileInstr (S.If _ b1 b2) = do
@@ -327,8 +346,10 @@ compileInstr (S.If _ b1 b2) = do
   _               <- moveOperandStack originID b2Ident  -- same instrs as thenInstrs
   b2Compiled      <- concat <$> traverse compileInstr (appendTerm b2)
   popScope
-  let instr = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
-  pure $ fmap I phiP ++ fmap I thenInstrs ++ [instr] ++ b1Compiled ++ b2Compiled
+  let term = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
+  tell $ toLog "    if-emit: " $ phiP ++ thenInstrs
+  tell $ toLog "    if-term: " [term]
+  pure $ fmap I phiP ++ fmap I thenInstrs ++ [term] ++ b1Compiled ++ b2Compiled
 
 -- the index here is the levels of scopes. It's a WASM peculiarity
 compileInstr (S.Br i)       = do
@@ -336,7 +357,10 @@ compileInstr (S.Br i)       = do
   dest     <- readScope $ fromIntegral i
   brInstrs <- moveOperandStack origin dest
   incrBlockIdentifier
-  pure $ fmap I brInstrs ++ [T $ AST.Do $ AST.Br dest []]
+  let term = AST.Do $ AST.Br dest []
+  tell $ toLog "    br-emit: " brInstrs
+  tell $ toLog "    br-term: " [term]
+  pure $ fmap I brInstrs ++ [T term]
 
 compileInstr (S.BrIf i)     = do
   blockIndx       <- blockIdentifier <$> get
@@ -347,9 +371,13 @@ compileInstr (S.BrIf i)     = do
   brInstrs        <- branchOperandStack origin dest
   _               <- moveOperandStack origin fallthrough  -- same instrs as thenInstrs
   incrBlockIdentifier
-  pure $ fmap I phiP ++ fmap I brInstrs ++ [T $ AST.Do $ AST.CondBr operand dest fallthrough []]
+  let term = AST.Do $ AST.CondBr operand dest fallthrough []
+  tell $ toLog "    brif-emit: " $ phiP ++ brInstrs
+  tell $ toLog "    brif-term: " [term]
+  pure $ fmap I phiP ++ fmap I brInstrs ++ [T term]
 
 compileInstr (S.Block _ body) = do
+  tell $ ["  begin block"]
   blockIndx <- blockIdentifier <$> get
   let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
       numberOfBlocks = countTerminals wasmInstrs
@@ -357,10 +385,12 @@ compileInstr (S.Block _ body) = do
   pushScope endOfBlock
   compiled <- concat <$> traverse compileInstr wasmInstrs
   popScope
+  tell $ ["  end block"]
   pure compiled
 
 -- the difference with Block is where the scope starts
 compileInstr (S.Loop _ body) = do
+  tell $ ["  begin loop"]
   blockIndx <- blockIdentifier <$> get
   let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 1) body
       numberOfBlocks = countTerminals wasmInstrs
@@ -372,6 +402,7 @@ compileInstr (S.Loop _ body) = do
   compiled <- concat <$> traverse compileInstr wasmInstrs
   popScope
   popScope
+  tell $ ["  end loop"]
   pure $ start : compiled
 
 compileInstr (S.I32Load memArg) = compileMemInstr S.BS32 bomwi memArg
@@ -434,6 +465,7 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     -- `if` in WASM (and possibly other instructions). These need to be
     -- un-nested into their own blocks in LLVM.
     funcGen    = do
+      tell ["func def: " ++ show indx]
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
       let FT { arguments, returnType } = functionTypes M.! (S.funcType func)

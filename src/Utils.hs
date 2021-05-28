@@ -42,3 +42,7 @@ operandType (ConstantOperand (Int bs _)) = IntegerType bs
 operandType (ConstantOperand (Float (Single _))) = FloatingPointType FloatFP
 operandType (ConstantOperand (Float (Double _))) = FloatingPointType DoubleFP
 operandType t = error $ "Not a recognized type: " ++ show t
+
+toLog :: (Show a) => String -> [a] -> [String]
+toLog header []     = []
+toLog header (x:xs) = (header ++ show x) : ((replicate (length header) ' ' ++) . show <$> xs)
