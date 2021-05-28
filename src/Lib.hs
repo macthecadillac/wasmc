@@ -287,10 +287,12 @@ compileInstr (S.GetLocal n)        = const <|> ref
       FuncST { localVariableTypes, localConst, blockIdentifier } <- get
       varType     <- withMsg $ M.lookup name localVariableTypes
       constants   <- withMsg $ M.lookup name localConst
-      let outofblockInstr = do
-            constructor <- newInstructionConstructor varType
-            let operand = first AST.ConstantOperand . swap <$> M.assocs constants
-            pure [I $ constructor $ AST.Phi varType operand []]
+      let outofblockInstr = case M.assocs constants of
+                              []       -> error "no constants found"
+                              [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
+                              l        -> do constructor <- newInstructionConstructor varType
+                                             let operand = first AST.ConstantOperand . swap <$> l
+                                             pure [I $ constructor $ AST.Phi varType operand []]
           inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
           blockID         = makeName "block" blockIdentifier
       maybe outofblockInstr inblockInstr $ M.lookup blockID constants
@@ -305,6 +307,7 @@ compileInstr S.Return = do
   (phi, term) <- returnOperandStackItems
   blockID     <- makeName "block" . blockIdentifier <$> get
   deleteOperandStack blockID
+  incrBlockIdentifier
   pure $ (I <$> phi) ++ [T term]
 
 compileInstr (S.If _ b1 b2) = do

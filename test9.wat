@@ -3,6 +3,8 @@
   (func $foo (result i64)
     (local $x i64)
     (local $y i64)
+    (i64.const 0)
+    (local.set $y)
     (i64.const 2)
     (local.set $x)
     (local.get $x)
@@ -10,7 +12,7 @@
     (if
       (then
         (i64.const 42)
-        (local.set $y))
+        (return))
       (else
         (local.get $x)
         (i64.const 1)
@@ -18,8 +20,8 @@
         (if
           (then
             (i64.const 99)
-            (local.set $y))
+            (return))
           (else
             (i64.const 7)
-            (local.set $y)))))
+            (return)))))
     (local.get $y)))
