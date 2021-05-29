@@ -2,7 +2,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TupleSections #-}
 module Gen where
 
 import Control.Applicative
@@ -27,18 +26,18 @@ import Utils (makeName, operandType, toLog)
 type NestedMap a = M.Map Name.Name (M.Map Name.Name a)
 
 data OperandStack = OpS { currentBlock :: [AST.Operand]
-                        , previousBlocks :: (M.Map Name.Name [AST.Operand]) }
+                        , previousBlocks :: M.Map Name.Name [AST.Operand] }
                         deriving (Show)
 
 -- a record for per-function state variables
-data FuncST = FuncST { operandStack :: M.Map Name.Name OperandStack -- stack of operands associated to a block
-                     , localIdentifier :: Natural
-                     , blockIdentifier :: Natural
-                     , blockScopeStack :: [Name.Name]
-                     , renameMap :: M.Map Name.Name Name.Name
-                     , localConst :: NestedMap Constant.Constant  -- the constants associated with the identifier of the incoming block
-                     , localVariableTypes :: M.Map Name.Name Type.Type }
-                     deriving (Show)
+data InstrST = InstrST { operandStack :: M.Map Name.Name OperandStack -- stack of operands associated to a block
+                       , localIdentifier :: Natural
+                       , blockIdentifier :: Natural
+                       , blockScopeStack :: [Name.Name]
+                       , renameMap :: M.Map Name.Name Name.Name
+                       , localConst :: NestedMap Constant.Constant  -- the constants associated with the identifier of the incoming block
+                       , localVariableTypes :: M.Map Name.Name Type.Type }
+                       deriving (Show)
 
 data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
   deriving (Show)
@@ -53,8 +52,8 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
 newtype ModGen a = ModGen { _modGen :: ExceptT String (ReaderT ModEnv (Writer [String])) a }
   deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadWriter [String], MonadError String)
 
-newtype FuncGen a = FuncGen { _funcGen :: StateT FuncST ModGen a }
-  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadWriter [String], F.MonadFail, MonadError String, MonadState FuncST)
+newtype InstrGen a = InstrGen { _funcGen :: StateT InstrST ModGen a }
+  deriving (Functor, Applicative, Monad, MonadReader ModEnv, MonadWriter [String], F.MonadFail, MonadError String, MonadState InstrST)
 
 instance F.MonadFail ModGen where
   fail = liftEither . Left
@@ -63,18 +62,18 @@ instance F.MonadFail ModGen where
 evalModGen :: ModGen a -> ModEnv -> Either String a
 evalModGen a r = first (\e -> "Error: " ++ e ++ log) val
   where
-    log = "\n\nLog:\n" ++ (L.concat $ L.intersperse "\n" logLines) ++ "\n<---Error"
+    log = "\n\nLog:\n" ++ L.intercalate "\n" logLines ++ "\n<---Error"
     (val, logLines) = runWriter (runReaderT (runExceptT (_modGen a)) r)
 
-evalFuncGen :: FuncGen a -> FuncST -> ModGen a
-evalFuncGen a = evalStateT (_funcGen a)
+evalInstrGen :: InstrGen a -> InstrST -> ModGen a
+evalInstrGen a = evalStateT (_funcGen a)
 
-runFuncGen :: FuncGen a -> FuncST -> ModGen (a, FuncST)
-runFuncGen a = runStateT (_funcGen a)
+runInstrGen :: InstrGen a -> InstrST -> ModGen (a, InstrST)
+runInstrGen a = runStateT (_funcGen a)
 
 -- choice with backtracking for stateful functions
 propagateChoice :: (Alternative f, Alternative g) => (f a -> b -> g c) -> f a -> f a -> b -> g c
-propagateChoice f a b s = (f a s) <|> (f b s)
+propagateChoice f a b s = f a s <|> f b s
 
 instance Alternative ModGen where
   empty   = F.fail ""
@@ -82,51 +81,51 @@ instance Alternative ModGen where
     where
       eval a r = fst $ runWriter (runReaderT (runExceptT (_modGen a)) r)
 
-instance Alternative FuncGen where
+instance Alternative InstrGen where
   empty   = F.fail ""
-  a <|> b = FuncGen $ StateT $ propagateChoice runFuncGen a b
+  a <|> b = InstrGen $ StateT $ propagateChoice runInstrGen a b
 
-popScope :: FuncGen ()
+popScope :: InstrGen ()
 popScope = do
-  scopeStack <- blockScopeStack <$> get
+  scopeStack <- gets blockScopeStack
   (_, tail)  <- maybe (F.fail "Empty scope stack") pure $ L.uncons scopeStack
   modify $ \st -> st { blockScopeStack = tail }
 
-pushScope :: Name.Name -> FuncGen ()
+pushScope :: Name.Name -> InstrGen ()
 pushScope s = modify $ \st -> st { blockScopeStack = s : blockScopeStack st }
 
-readScope :: Int -> FuncGen Name.Name
+readScope :: Int -> InstrGen Name.Name
 readScope i = do
-  scopeStack <- blockScopeStack <$> get
+  scopeStack <- gets blockScopeStack
   maybe (F.fail "Undefined scope") (pure . snd) $ L.find ((i==) . fst) $ zip [0..] scopeStack
 
 -- seriously, consider using lens
-unassignConstant :: Name.Name -> FuncGen ()
+unassignConstant :: Name.Name -> InstrGen ()
 unassignConstant name = do
-  st@FuncST { blockIdentifier, localConst } <- get
+  st@InstrST { blockIdentifier, localConst } <- get
   let blockID    = makeName "block" blockIdentifier
       f (Just m) = Just $ M.delete blockID m
       f Nothing  = Nothing
   put $ st { localConst = M.alter f name localConst }
 
-assignConstant :: Name.Name -> Constant.Constant -> FuncGen ()
+assignConstant :: Name.Name -> Constant.Constant -> InstrGen ()
 assignConstant name const = do
-  st@FuncST { blockIdentifier, localConst } <- get
+  st@InstrST { blockIdentifier, localConst } <- get
   let blockID    = makeName "block" blockIdentifier
       f (Just m) = Just $ M.insert blockID const m
       f Nothing  = Just $ M.singleton blockID const
   put $ st { localConst = M.alter f name localConst }
 
-addRenameAction :: Name.Name -> Name.Name -> FuncGen ()
+addRenameAction :: Name.Name -> Name.Name -> InstrGen ()
 addRenameAction name newName =
   modify $ \st -> st { renameMap = M.insert name newName $ renameMap st }
 
 -- pop operand off the `operandStack`
 -- the rename action here should always be valid because of SSA and because we
 -- do not reuse identifiers
-popOperand :: FuncGen ([AST.Named AST.Instruction], AST.Operand)
+popOperand :: InstrGen ([AST.Named AST.Instruction], AST.Operand)
 popOperand = do
-  FuncST { operandStack, renameMap, blockIdentifier } <- get
+  InstrST { operandStack, renameMap, blockIdentifier } <- get
   let blockID = makeName "block" blockIdentifier
   localStack <- liftMaybe $ M.lookup blockID operandStack
   (op, rest) <- liftMaybe $ uncons blockID localStack
@@ -153,10 +152,10 @@ popOperand = do
       re (Op.LocalReference t name) = Op.LocalReference t . fromMaybe name . M.lookup name
       re op                         = const op
 
-      combine []             = error "impossible branch"
+      combine []             = F.fail "impossible branch"
       combine [(x, _)]       = pure ([], x)
       combine ops@((x, _):_) = do
-        n <- localIdentifier <$> get
+        n <- gets localIdentifier
         let opType = operandType x
             ident  = makeName "tmp" n
             instr  = ident AST.:= AST.Phi opType ops []
@@ -164,25 +163,25 @@ popOperand = do
         incrLocalIdentifier
         pure ([instr], op)
 
-pushOperand :: AST.Operand -> FuncGen ()
+pushOperand :: AST.Operand -> InstrGen ()
 pushOperand op = do
   tell $ toLog "    push operand: " [op]
-  FuncST { operandStack, blockIdentifier } <- get
+  InstrST { operandStack, blockIdentifier } <- get
   let blockID       = makeName "block" blockIdentifier
       OpS stack map = fromMaybe (OpS [] M.empty) $ M.lookup blockID operandStack
   modify $ \st -> st { operandStack = M.insert blockID (OpS (op:stack) map) operandStack }
 
-pushOperands :: [AST.Operand] -> FuncGen ()
+pushOperands :: [AST.Operand] -> InstrGen ()
 pushOperands = mapM_ pushOperand
 
-deleteOperandStack :: Name.Name -> FuncGen ()
+deleteOperandStack :: Name.Name -> InstrGen ()
 deleteOperandStack name = do
-  st@FuncST { operandStack } <- get
+  st@InstrST { operandStack } <- get
   put $ st { operandStack = M.delete name operandStack }
 
-branchOperandStack :: Name.Name -> Name.Name -> FuncGen ([AST.Named AST.Instruction])
+branchOperandStack :: Name.Name -> Name.Name -> InstrGen [AST.Named AST.Instruction]
 branchOperandStack origin dest = do
-  FuncST { operandStack, localIdentifier } <- get
+  InstrST { operandStack, localIdentifier } <- get
   let originStack  = fromMaybe (OpS [] M.empty) $ M.lookup origin operandStack
       (OpS st m)   = fromMaybe (OpS [] M.empty) $ M.lookup dest operandStack
   (n, instrs, ops) <- liftEither $ collapseStacks localIdentifier originStack
@@ -191,7 +190,7 @@ branchOperandStack origin dest = do
                      , localIdentifier = n }
   pure instrs
 
-moveOperandStack :: Name.Name -> Name.Name -> FuncGen ([AST.Named AST.Instruction])
+moveOperandStack :: Name.Name -> Name.Name -> InstrGen [AST.Named AST.Instruction]
 moveOperandStack origin dest = do
   instrs <- branchOperandStack origin dest
   deleteOperandStack origin
@@ -199,12 +198,12 @@ moveOperandStack origin dest = do
 
 collapseStacks :: Natural -> OperandStack -> Either String (Natural, [AST.Named AST.Instruction], [AST.Operand])
 collapseStacks n (OpS stack map) = do
-  stacks <- transpose $ toTupleList map
-  let (combined, n')     = runState (traverse combine $ stacks) n
-      (instrs, operands) = unzip combined
+  stacks         <- transpose $ toTupleList map
+  (combined, n') <- runExcept $ runStateT (traverse combine stacks) n
+  let (instrs, operands) = unzip combined
   pure (n', instrs, stack ++ operands)
     where
-      combine []                 = error "empty sub-stack"
+      combine []                 = liftEither $ Left "empty sub-stack"
       combine ops@((fstOp, _):_) = do
         n <- get
         let ident  = makeName "tmp" n
@@ -227,33 +226,34 @@ collapseStacks n (OpS stack map) = do
         pure [(op, name) | op <- ops]
 
 
-incrBlockIdentifier :: FuncGen ()
+incrBlockIdentifier :: InstrGen ()
 incrBlockIdentifier = modify $ \st -> st { blockIdentifier = blockIdentifier st + 1 }
 
-incrLocalIdentifier :: FuncGen ()
+incrLocalIdentifier :: InstrGen ()
 incrLocalIdentifier = modify $ \st -> st { localIdentifier = localIdentifier st + 1 }
 
 -- create a new identifier, put the identifier on the `operandStack` and
 -- increment the global identifier tracker
-newInstructionConstructor :: Type.Type -> FuncGen (AST.Instruction -> AST.Named AST.Instruction)
+newInstructionConstructor :: Type.Type -> InstrGen (AST.Instruction -> AST.Named AST.Instruction)
 newInstructionConstructor Type.VoidType = pure AST.Do
 newInstructionConstructor idType        = do
-  FuncST { localIdentifier, operandStack } <- get
+  InstrST { localIdentifier, operandStack } <- get
   let name       = makeName "tmp" localIdentifier
       identifier = AST.LocalReference idType name
   pushOperand identifier
   incrLocalIdentifier
   pure (name AST.:=)
 
-returnOperandStackItems :: FuncGen ([AST.Named AST.Instruction], AST.Named AST.Terminator)
+returnOperandStackItems :: InstrGen ([AST.Named AST.Instruction], AST.Named AST.Terminator)
 returnOperandStackItems = do
-  FuncST { operandStack, blockIdentifier, localIdentifier } <- get
+  InstrST { operandStack, blockIdentifier, localIdentifier } <- get
   let blockID    = makeName "block" blockIdentifier
       localStack = fromMaybe (OpS [] M.empty) $ M.lookup blockID operandStack
   (n, instrs, ops) <- liftEither $ collapseStacks localIdentifier localStack
   modify $ \st -> st { localIdentifier = n }
-  pure (instrs, AST.Do $ AST.Ret (collapseOps ops) [])
+  ret              <- collapseOps ops
+  pure (instrs, AST.Do $ AST.Ret ret [])
     where
-      collapseOps []  = Nothing
-      collapseOps [x] = Just x
-      collapseOps _   = error "multiple ret vals not implemented"
+      collapseOps []  = pure Nothing
+      collapseOps [x] = pure $ Just x
+      collapseOps _   = F.fail "multiple ret vals not implemented"

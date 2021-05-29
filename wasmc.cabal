@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: e84443b54f86ce866afb1506caba2d57a49a5199a529de8194bb68ba65ef6837
+-- hash: 7c2d66f6e29722b285549ac589b4687b10b3a1d7f07db7395fbf87f56fbca7d2
 
 name:           wasmc
 version:        0.1.0.0
@@ -30,6 +30,7 @@ library
       Gen
       Intrinsics
       Lib
+      Mem
       Utils
   other-modules:
       Paths_wasmc

@@ -226,7 +226,7 @@ compileInstr (S.FUnOp bs S.FSqrt)    = callIntrinsics $ "llvm.sqrt.f" ++ sBitSiz
 compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) *> compileInstr (S.IRelOp S.BS32 S.IEq)
 compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) *> compileInstr (S.IRelOp S.BS64 S.IEq)
 
-compileInstr S.I32WrapI64            = undefined
+compileInstr S.I32WrapI64            = F.fail "not implemented: S.I32WrapI64"
 compileInstr S.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
 compileInstr S.I64ExtendUI32         = compileCastOp AST.ZExt Type.i64
 compileInstr (S.ITruncFU _ bs)       = compileCastOp AST.SIToFP $ iBitSize bs
