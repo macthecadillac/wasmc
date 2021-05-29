@@ -32,6 +32,8 @@ import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Operand as Operand
 import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Type as Type
+import qualified LLVM.AST.Linkage as Linkage
+import qualified LLVM.AST.Visibility as Visibility
 
 import Intrinsics
 import Gen
@@ -48,13 +50,21 @@ type OOI    = AST.Operand -> AST.Operand -> AST.InstructionMetadata -> AST.Instr
 type MOI    = Maybe AST.Operand -> AST.InstructionMetadata -> AST.Terminator
 type BOMWI = Bool -> AST.Operand -> Maybe AST.Atomicity -> Word32 -> AST.InstructionMetadata -> AST.Instruction
 type BOOMWI = Bool -> AST.Operand -> AST.Operand -> Maybe AST.Atomicity -> Word32 -> AST.InstructionMetadata -> AST.Instruction
+type OTI    = AST.Operand -> Type.Type -> AST.InstructionMetadata -> AST.Instruction
 
 type UnOpBuilder a = a -> AST.Operand -> AST.Instruction
 type BinOpBuilder a = a -> AST.Operand -> AST.Operand -> AST.Instruction
 type CmpBuilder p = POOI p -> p -> AST.Operand -> AST.Operand -> AST.Instruction
 type LoadMemBuilder = AST.Operand -> Word32 -> AST.Instruction
 type StoreMemBuilder = AST.Operand -> AST.Operand -> Word32 -> AST.Instruction
+-- allocatedType :: Type	 
+-- numElements :: Maybe Operand	 
+-- alignment :: Word32	 
+-- metadata :: InstructionMetadata	 
+type GrowMemBuilder = Type.Type -> Maybe AST.Operand -> Word32 -> AST.Instruction
 
+towi :: GrowMemBuilder
+towi ty numEl aln = AST.Alloca ty numEl aln []
 
 bomwi :: LoadMemBuilder
 bomwi addr aln = AST.Load False addr Nothing aln []
@@ -108,7 +118,7 @@ fBitSize S.BS64 = Type.double
 wasmIsTerm :: S.Instruction a -> Bool
 wasmIsTerm S.Unreachable = True
 wasmIsTerm S.Return      = True
-wasmIsTerm (S.If _ _ _)  = True
+wasmIsTerm S.If {}       = True
 wasmIsTerm (S.Br _)      = True
 wasmIsTerm (S.BrIf _)    = True
 wasmIsTerm (S.Block _ _) = True
@@ -130,13 +140,13 @@ countTerminals = sum . fmap aux
     oneIfHead g (x:_) | g x       = 1
                       | otherwise = 0
 
-compileConst :: Constant.Constant -> FuncGen [LLVMInstr]
+compileConst :: Constant.Constant -> InstrGen [LLVMInstr]
 compileConst const = do
   tell $ toLog "    constant: " [const]
   pushOperand $ AST.ConstantOperand const
   pure []
 
-compileBinOp :: BinOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
+compileBinOp :: BinOpBuilder a -> a -> Type.Type -> InstrGen [LLVMInstr]
 compileBinOp builder op t = do
   (phiB, b)   <- popOperand
   (phiA, a)   <- popOperand
@@ -147,7 +157,7 @@ compileBinOp builder op t = do
   tell $ toLog "    emit: " instrs
   pure $ fmap I instrs
 
-compileUnOp :: UnOpBuilder a -> a -> Type.Type -> FuncGen [LLVMInstr]
+compileUnOp :: UnOpBuilder a -> a -> Type.Type -> InstrGen [LLVMInstr]
 compileUnOp builder op t = do
   (phi, a)  <- popOperand
   constructor <- newInstructionConstructor t
@@ -155,7 +165,7 @@ compileUnOp builder op t = do
   tell $ toLog "    emit: " instrs
   pure $ fmap I instrs
 
-compileCmpOp :: POOI p -> p -> FuncGen [LLVMInstr]
+compileCmpOp :: POOI p -> p -> InstrGen [LLVMInstr]
 compileCmpOp cmp pred = do
   (phiB, b)   <- popOperand
   (phiA, a)   <- popOperand
@@ -164,8 +174,16 @@ compileCmpOp cmp pred = do
   let instrs = phiB ++ phiA ++ [constructor $ pooi cmp pred a b]
   tell $ toLog "    emit: " instrs
   pure $ fmap I instrs
+  
+compileCastOp :: OTI -> Type.Type -> InstrGen [LLVMInstr]
+compileCastOp op t = do
+  (phi, a)    <- popOperand
+  constructor <- newInstructionConstructor t
+  let instrs = phi ++ [constructor $ op a t []]
+  tell $ toLog "    emit: " instrs
+  pure $ fmap I instrs
 
-compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> FuncGen [LLVMInstr]
+compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
 compileFunctionCall name arguments returnType = do
   let nArgs                        = fromIntegral (L.length arguments)
       function                     = AST.ConstantOperand
@@ -173,7 +191,7 @@ compileFunctionCall name arguments returnType = do
                                    $ Type.FunctionType returnType arguments False
   -- pop the required number of operands off the `operandStack` and
   -- collect the results into a list. `replicateM` deals with the
-  -- FuncGen monad.
+  -- InstrGen monad.
   ops       <- replicateM (fromIntegral nArgs) popOperand
   let (phis, args) = unzip ops
       arguments    = reverse [(operand, []) | operand <- args]
@@ -183,12 +201,12 @@ compileFunctionCall name arguments returnType = do
   tell $ toLog "    call-emit: " instrs
   pure $ fmap I instrs
 
-callIntrinsics :: String -> FuncGen [LLVMInstr]
+callIntrinsics :: String -> InstrGen [LLVMInstr]
 callIntrinsics name = do
   let FT { arguments, returnType } = llvmIntrinsicsTypes M.! name
   compileFunctionCall (Name.mkName name) arguments returnType
 
-compileInstr :: S.Instruction Natural -> FuncGen [LLVMInstr]
+compileInstr :: S.Instruction Natural -> InstrGen [LLVMInstr]
 compileInstr S.Unreachable          = pure [T $ AST.Do $ AST.Unreachable []]
 compileInstr S.Nop                  = pure []
 
@@ -209,16 +227,16 @@ compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) *> compileIns
 compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) *> compileInstr (S.IRelOp S.BS64 S.IEq)
 
 compileInstr S.I32WrapI64            = undefined
-compileInstr S.I64ExtendSI32         = undefined
-compileInstr S.I64ExtendUI32         = undefined
-compileInstr (S.ITruncFU bs1 bs2)    = undefined
-compileInstr (S.ITruncFS bs1 bs2)    = undefined
-compileInstr (S.FConvertIU bs1 bs2)  = undefined
-compileInstr (S.FConvertIS bs1 bs2)  = undefined
-compileInstr S.F32DemoteF64          = undefined
-compileInstr S.F64PromoteF32         = undefined
-compileInstr (S.IReinterpretF bs)    = undefined
-compileInstr (S.FReinterpretI bs)    = undefined
+compileInstr S.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
+compileInstr S.I64ExtendUI32         = compileCastOp AST.ZExt Type.i64
+compileInstr (S.ITruncFU _ bs)       = compileCastOp AST.SIToFP $ iBitSize bs
+compileInstr (S.ITruncFS _ bs)       = compileCastOp AST.UIToFP $ iBitSize bs
+compileInstr (S.FConvertIU _ bs)     = compileCastOp AST.FPToUI $ iBitSize bs
+compileInstr (S.FConvertIS _ bs)     = compileCastOp AST.FPToSI $ iBitSize bs
+compileInstr S.F32DemoteF64          = compileCastOp AST.FPTrunc Type.float
+compileInstr S.F64PromoteF32         = compileCastOp AST.FPExt Type.double
+compileInstr (S.IReinterpretF bs)    = compileCastOp AST.BitCast $ iBitSize bs
+compileInstr (S.FReinterpretI bs)    = compileCastOp AST.BitCast $ iBitSize bs
 
 compileInstr (S.IBinOp bs S.IAdd)  = compileBinOp bbooi AST.Add  $ iBitSize bs
 compileInstr (S.IBinOp bs S.ISub)  = compileBinOp bbooi AST.Sub  $ iBitSize bs
@@ -294,12 +312,12 @@ compileInstr (S.GetLocal n)        = const <|> ref
     name = makeName "local" n
     withMsg = maybe (F.fail $ "unbound reference: " ++ show name) pure
     ref = do
-      FuncST { localVariableTypes } <- get
+      InstrST { localVariableTypes } <- get
       operand <- withMsg $ AST.LocalReference <$> M.lookup name localVariableTypes <*> pure name
       pushOperand operand
       pure []
     const = do
-      FuncST { localVariableTypes, localConst, blockIdentifier } <- get
+      InstrST { localVariableTypes, localConst, blockIdentifier } <- get
       varType     <- withMsg $ M.lookup name localVariableTypes
       constants   <- withMsg $ M.lookup name localConst
       let outofblockInstr = case M.assocs constants of
@@ -322,7 +340,7 @@ compileInstr (S.Call i) = do
 
 compileInstr S.Return = do
   (phi, term) <- returnOperandStackItems
-  blockID     <- makeName "block" . blockIdentifier <$> get
+  blockID     <- gets $ makeName "block" . blockIdentifier
   deleteOperandStack blockID
   incrBlockIdentifier
   tell $ toLog "    return-emit: " phi
@@ -330,7 +348,7 @@ compileInstr S.Return = do
   pure $ (I <$> phi) ++ [T term]
 
 compileInstr (S.If _ b1 b2) = do
-  blockIndx <- blockIdentifier <$> get
+  blockIndx <- gets blockIdentifier
   let b1Count    = countTerminals b1
       b2Count    = countTerminals b2
       originID   = makeName "block" blockIndx
@@ -353,7 +371,7 @@ compileInstr (S.If _ b1 b2) = do
 
 -- the index here is the levels of scopes. It's a WASM peculiarity
 compileInstr (S.Br i)       = do
-  origin   <- makeName "block" . blockIdentifier <$> get
+  origin   <- gets $ makeName "block" . blockIdentifier
   dest     <- readScope $ fromIntegral i
   brInstrs <- moveOperandStack origin dest
   incrBlockIdentifier
@@ -363,7 +381,7 @@ compileInstr (S.Br i)       = do
   pure $ fmap I brInstrs ++ [T term]
 
 compileInstr (S.BrIf i)     = do
-  blockIndx       <- blockIdentifier <$> get
+  blockIndx       <- gets blockIdentifier
   dest            <- readScope $ fromIntegral i
   (phiP, operand) <- popOperand
   let origin      = makeName "block" blockIndx
@@ -378,7 +396,7 @@ compileInstr (S.BrIf i)     = do
 
 compileInstr (S.Block _ body) = do
   tell $ ["  begin block"]
-  blockIndx <- blockIdentifier <$> get
+  blockIndx <- gets blockIdentifier
   let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
       numberOfBlocks = countTerminals wasmInstrs
       endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks
@@ -391,7 +409,7 @@ compileInstr (S.Block _ body) = do
 -- the difference with Block is where the scope starts
 compileInstr (S.Loop _ body) = do
   tell $ ["  begin loop"]
-  blockIndx <- blockIdentifier <$> get
+  blockIndx <- gets blockIdentifier
   let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 1) body
       numberOfBlocks = countTerminals wasmInstrs
       startOfBlock   = makeName "block" $ blockIndx + 1
@@ -409,27 +427,33 @@ compileInstr (S.I32Load memArg) = compileMemInstr S.BS32 bomwi memArg
 compileInstr (S.I64Load memArg) = compileMemInstr S.BS64 bomwi memArg
 compileInstr (S.F32Load memArg) = compileMemInstr S.BS32 bomwi memArg
 compileInstr (S.F64Load memArg) = compileMemInstr S.BS64 bomwi memArg
--- compileInstr (S.I32Load8S  S.MemArArBS) = compileMemInstr S.BS32 bomwi memArg
-compileInstr (S.I32Load8U  memArg) = compileMemInstr S.BS32 bomwi memArg
--- compileInstr (S.I32Load16S  S.MemArg) = compileMemInstr S.BS32 bomwi memArg
--- compileInstr (S.I32Load16U  S.MemArg) = compileMemInstr S.BS32 bomwi memArg
--- compileInstr (S.I64Load8S  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
--- compileInstr (S.I64Load8U  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
--- compileInstr (S.I64Load16S  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
--- compileInstr (S.I64Load16U  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
--- compileInstr (S.I64Load32S  S.MemArg) = compileMemInstr S.BS64 bomwi memArg
--- compileInstr (S.I64Load32U  memArg) = compileMemInstr S.BS64 bomwi memArg
+compileInstr (S.I32Load8S memArg) = compileMemInstr S.BS32 bomwi memArg
+compileInstr (S.I32Load8U  memArg) = compileMemInstr S.BS32 bomwi memArg
+compileInstr (S.I32Load16S memArg) = compileMemInstr S.BS32 bomwi memArg
+compileInstr (S.I32Load16U memArg) = compileMemInstr S.BS32 bomwi memArg
+compileInstr (S.I64Load8S  memArg) = compileMemInstr S.BS64 bomwi memArg
+compileInstr (S.I64Load8U  memArg) = compileMemInstr S.BS64 bomwi memArg
+compileInstr (S.I64Load16S memArg) = compileMemInstr S.BS64 bomwi memArg
+compileInstr (S.I64Load16U memArg) = compileMemInstr S.BS64 bomwi memArg
+compileInstr (S.I64Load32S memArg) = compileMemInstr S.BS64 bomwi memArg
+compileInstr (S.I64Load32U memArg) = compileMemInstr S.BS64 bomwi memArg
 
 
 compileInstr (S.I32Store memArg) = compileMem2Instr S.BS32 boomwi memArg
 compileInstr (S.I64Store memArg) = compileMem2Instr S.BS64 boomwi memArg
--- compileInstr (S.F32Store S.MemArg) = compileMem2Instr S.BS32 boomwi memArg
--- compileInstr (S.F64Store S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
--- compileInstr (S.I32Store8 S.MemArg) = compileMem2Instr S.BS32 boomwi memArg
--- compileInstr (S.I32Store16 S.MemArg) = compileMem2Instr S.BS32 boomwi memArg
--- compileInstr (S.I64Store8 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
--- compileInstr (S.I64Store16 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
--- compileInstr (S.I64Store32 S.MemArg) = compileMem2Instr S.BS64 boomwi memArg
+compileInstr (S.F32Store memArg) = compileMem2Instr S.BS32 boomwi memArg
+compileInstr (S.F64Store memArg) = compileMem2Instr S.BS64 boomwi memArg
+compileInstr (S.I32Store8 memArg) = compileMem2Instr S.BS32 boomwi memArg
+compileInstr (S.I32Store16 memArg) = compileMem2Instr S.BS32 boomwi memArg
+compileInstr (S.I64Store8 memArg) = compileMem2Instr S.BS64 boomwi memArg
+compileInstr (S.I64Store16 memArg) = compileMem2Instr S.BS64 boomwi memArg
+compileInstr (S.I64Store32 memArg) = compileMem2Instr S.BS64 boomwi memArg
+
+--LLVM: ??
+--compileInstr S.CurrentMemory = compileMem2Instr S.BS64 boomwi 
+--LLVM: Alloca
+compileInstr S.GrowMemory = compileMemGrow towi 
+
 
 compileInstr instr = F.fail $ "not implemented: " ++ show instr
 
@@ -453,9 +477,9 @@ compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 
 -- compiles one WASM function into an LLVM function.
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
-compileFunction indx func = evalFuncGen funcGen initFuncST
+compileFunction indx func = evalInstrGen instrGen initExprST
   where
-    initFuncST = FuncST M.empty 0 0 [] M.empty M.empty M.empty
+    initExprST = InstrST M.empty 0 0 [] M.empty M.empty M.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     -- split the list of `LLVMObj` into blocks by looking for terminators. The
@@ -464,7 +488,7 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     -- FIXME: splitAfter is not good enough since some blocks are nested under
     -- `if` in WASM (and possibly other instructions). These need to be
     -- un-nested into their own blocks in LLVM.
-    funcGen    = do
+    instrGen    = do
       tell ["func def: " ++ show indx]
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
@@ -514,45 +538,47 @@ compileFunction indx func = evalFuncGen funcGen initFuncST
     -- rename instructions to reflect "variable" assignments
     renameInstrs = traverse renameInstr
       where
-        renameInstr :: LLVMInstr -> FuncGen LLVMInstr
-        renameInstr (I ((AST.:=) name instr)) = I . flip (AST.:=) instr . rename name <$> get
+        renameInstr :: LLVMInstr -> InstrGen LLVMInstr
+        renameInstr (I ((AST.:=) name instr)) = gets $ I . flip (AST.:=) instr . rename name
         renameInstr t@(I _)                   = pure t
         renameInstr t@(T _)                   = pure t
         rename name = fromMaybe name . M.lookup name . renameMap
 
+-- FIXME: use linear memory
 -- globals in the WASM sense of the term
 compileGlobals :: Natural -> S.Global -> ModGen AST.Global
-compileGlobals index global = globVar
-  where
-    globVar     = do
-      init' <- init
-      let initializer = Just init'
-      pure $ AST.globalVariableDefaults { Global.name
-                                        , Global.isConstant 
-                                        , Global.type'
-                                        , Global.initializer
-                                        }
+compileGlobals index global = undefined
+  -- where
+  --   globVar     = do
+  --     init' <- init
+  --     let initializer = Just init'
+  --     pure $ AST.globalVariableDefaults { Global.name
+  --                                       , Global.isConstant
+  --                                       , Global.type'
+  --                                       , Global.initializer
+  --                                       }
 
-    name       = makeName "global" index
-    isConstant = isConst $ S.globalType global
-    type'      = compileType' $ S.globalType global
-    exp        = compileInstr <$> S.initializer global
-    init       = case compileInstr <$> S.initializer global of
-                  --  [Op (Const const)] -> pure const
-                   -- TODO: maybe there's a way around this? The wasm specs says
-                   -- the initializer should be `expr` which could really be
-                   -- anything. Not sure how to implement that into LLVM though.
-                   _                  -> F.fail "initializer not constant"
+  --   name       = makeName "global" index
+  --   isConstant = isConst $ S.globalType global
+  --   type'      = compileType' $ S.globalType global
+  --   exp        = fmap concat $ traverse compileInstr $ S.initializer global
+  --   -- TODO: maybe there's a way around this? The wasm specs says
+  --   -- the initializer should be `expr` which could really be
+  --   -- anything. Not sure how to implement that into LLVM though.
+  --   init       = do l                          <- exp
+  --                   guard $ null l
+  --                   (_, AST.ConstantOperand c) <- popOperand
+  --                   pure c
 
-    isConst (S.Const _) = True
-    isConst _           = False
 
-    compileType' (S.Const t) = compileType t
-    compileType' (S.Mut   t) = compileType t
+  --   isConst (S.Const _) = True
+  --   isConst _           = False
+
+  --   compileType' (S.Const t) = compileType t
+  --   compileType' (S.Mut   t) = compileType t
 
 -- AST.moduleDefinitions Module
 -- ASTElem = Type.StructureType false [Type.IntegerType, Type.FunctionType]
-
 compileMemory :: Natural -> S.Table -> ModGen AST.Global
 compileMemory index table = globVar
   where
@@ -571,22 +597,56 @@ compileTable index table = globVar
   where
     globVar     = do
       pure $ AST.globalVariableDefaults { Global.name
-                                        , Global.isConstant 
+                                        , Global.linkage
+                                        -- , Global.isConstant 
                                         , Global.type'
+                                        , Global.visibility
+                                        , Global.alignment
                                         }
-
+    -- currently: @table0 = external   constant %Tabl
     name       = makeName "table" index
+    linkage    = Linkage.Internal
+    visibility = Visibility.Default
     isConstant = True
     type'      = Type.NamedTypeReference "Table"
+    alignment = 8
     
--- compileElement :: Natural -> S.ElemSegment -> [AST.Instruction]
--- compileElement index element = do
---   let offset = AST.Alloca Type.i32 1 4 []
---   [offset]
+compileElement :: Natural -> S.ElemSegment -> [AST.Instruction]
+compileElement index element = do
+  let offset = AST.Alloca Type.i32 (Just 1) 4 []
+  [offset]
 
--- compileElements :: Natural -> [S.ElemSegment] -> ModGen Global.Global
--- compileElements index elements = do
-  
+compileElements :: Natural -> [S.ElemSegment] -> ModGen Global.Global
+compileElements index elements = initTable
+  where
+    initTable = do
+      pure $ Global.functionDefaults { Global.name
+                                     , Global.returnType
+                                     , Global.basicBlocks 
+                                     }
+    name = makeName "tableInit" 0
+    instrs = [AST.Alloca Type.i32 (Just 1) 4 []]
+    basicBlocks = [AST.BasicBlock "tableInit" (assignName instrs) (AST.Do $ (AST.Ret (Just AST.LocalReference Type.VoidType) []))]
+    assignName instrs = fmap ("12" AST.:=) instrs
+    -- basicBlocks = fmap (buildBlock . assignName)
+    --         $ zip [0..]
+    --         $ fromMaybe (error "empty block")
+    --         $ traverse unsnoc blks
+    -- buildBlock (name, term, instrs) = AST.BasicBlock name instrs term
+    -- unwrapI (I i) = i
+    -- unwrapI term  = error $ "Not an LLVM instruction: " ++ show term
+    returnType = Type.void 
+    linkage    = Linkage.Internal
+    finalInstrs = []
+    totalElems :: [S.ElemSegment] -> Int -> Int
+    totalElems [] n = n
+    totalElems (a:x) n = totalElems x (n+y)
+      where
+        y = length (S.funcIndexes a)
+
+
+
+
 
 
 
@@ -621,7 +681,7 @@ compileTable index table = globVar
 -- %tmp0 = load ...
 -- %..   = add i32 ... %tmp0
 
-compileMemInstr :: S.BitSize -> LoadMemBuilder -> S.MemArg -> FuncGen [LLVMInstr]
+compileMemInstr :: S.BitSize -> LoadMemBuilder -> S.MemArg -> InstrGen [LLVMInstr]
 compileMemInstr bs builder memArg = --addr algn 
   do
     (phi, addr) <- popOperand
@@ -631,15 +691,29 @@ compileMemInstr bs builder memArg = --addr algn
     -- this amounts to saving the results to a 'variable.'
     
     constructor <- newInstructionConstructor $ iBitSize bs
-    pure $ fmap I $ phi ++ [constructor $ builder addr algn]
+    let instrs = phi ++ [constructor $ builder addr algn]
+    tell $ toLog "    emit: " instrs
+    pure $ fmap I instrs
 
-compileMem2Instr :: S.BitSize -> StoreMemBuilder -> S.MemArg -> FuncGen [LLVMInstr]
+compileMem2Instr :: S.BitSize -> StoreMemBuilder -> S.MemArg -> InstrGen [LLVMInstr]
 compileMem2Instr bs builder memArg = do
   (phiV, val)  <- popOperand
   (phiA, addr) <- popOperand
-  let algn = fromIntegral $ S.align memArg
-  pure $ fmap I $ phiV ++ phiA ++ [AST.Do $ builder addr val algn]
+  let algn   = fromIntegral $ S.align memArg
+      instrs = phiV ++ phiA ++ [AST.Do $ builder addr val algn]
+  tell $ toLog "    emit: " instrs
+  pure $ fmap I instrs
 
+
+
+compileMemGrow :: GrowMemBuilder -> InstrGen [LLVMInstr]
+compileMemGrow builder = do
+  (phiV, delta)  <- popOperand
+  -- (phiA, addr) <- popOperand
+  -- let algn   = fromIntegral $ S.align memArg
+  --     instrs = phiV ++ phiA ++ [AST.Do $ builder addr val algn]
+  tell $ toLog "    emit: " instrs
+  -- pure $ fmap I instrs
 
 -- TODO: datas
 -- TODO: imports
@@ -649,7 +723,7 @@ compileModule wasmMod = evalModGen modGen initModEnv
   where
     startFunctionIndex  = (\(S.StartFunction n) -> n) <$> S.start wasmMod
     extractFuncType     = compileFunctionType . (S.types wasmMod !!) . fromIntegral . S.funcType
-    functionTypes       = M.fromList $ zip [0..] $ fmap extractFuncType $ S.functions wasmMod
+    functionTypes       = M.fromList $ zip [0..] $ extractFuncType <$> S.functions wasmMod
     initModEnv          = ModEnv startFunctionIndex functionTypes
     wasmGlobals         = zip [0..] $ S.globals wasmMod
     wasmTables          = zip [0..] $ S.tables wasmMod
