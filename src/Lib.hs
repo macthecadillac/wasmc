@@ -4,6 +4,7 @@
 module Lib where
 
 import Control.Applicative ((<|>))
+import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Writer
@@ -23,6 +24,7 @@ import qualified Language.Wasm.Structure as S
 import qualified Language.Wasm.Structure (Function(..), MemArg(..))
 
 import qualified LLVM.AST as AST
+import qualified LLVM.AST.AddrSpace as Addr
 import qualified LLVM.AST.CallingConvention as Conv
 import qualified LLVM.AST.Constant as Constant
 import qualified LLVM.AST.Float as Float
@@ -184,7 +186,34 @@ compileCastOp op t = do
   pure $ fmap I instrs
 
 compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
-compileFunctionCall name arguments returnType = do
+compileFunctionCall name args retType@(Type.StructureType { Type.elementTypes }) = do
+  let ptrTy  = Type.PointerType retType $ Addr.AddrSpace 0 -- default addr
+  constr     <- newInstructionConstructor ptrTy
+  (_, ptr)   <- peekOperand  -- no phi since it was created right here
+  let allocInstr = constr $ AST.Alloca ptrTy Nothing 0 []
+  tell $ toLog "    call-emit: " [allocInstr]
+  callInstrs <- singleReturnCall name (args ++ [ptrTy]) Type.VoidType
+  tell $ toLog "          " callInstrs
+  let nRets         = length elementTypes
+      geteltptr = do
+        i <- [0..nRets - 1]
+        let op    = AST.ConstantOperand $ Constant.Int 32 $ fromIntegral i
+            instr = AST.GetElementPtr False ptr [op] []
+        pure instr
+  constrs <- traverse newInstructionConstructor elementTypes
+  let getPtrInstrs = constrs <*> geteltptr
+      loadInstr t = do
+        (_, ptr) <- popOperand  -- the operand was created right here
+        constr   <- newInstructionConstructor t
+        pure $ constr $ AST.Load False ptr Nothing 0 []
+  loadInstrs <- traverse loadInstr elementTypes
+  let cleanUpInstrs = getPtrInstrs ++ loadInstrs
+  tell $ toLog "          " cleanUpInstrs
+  pure $ [I allocInstr] ++ callInstrs ++ fmap I cleanUpInstrs
+compileFunctionCall name args retType = singleReturnCall name args retType
+
+singleReturnCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
+singleReturnCall name arguments returnType = do
   let nArgs                        = fromIntegral (L.length arguments)
       function                     = AST.ConstantOperand
                                    $ flip Constant.GlobalReference name 
@@ -192,13 +221,12 @@ compileFunctionCall name arguments returnType = do
   -- pop the required number of operands off the `operandStack` and
   -- collect the results into a list. `replicateM` deals with the
   -- InstrGen monad.
-  ops       <- replicateM (fromIntegral nArgs) popOperand
+  ops         <- replicateM (fromIntegral nArgs) popOperand
   let (phis, args) = unzip ops
       arguments    = reverse [(operand, []) | operand <- args]
       instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
   constructor <- newInstructionConstructor returnType
   let instrs = concat phis ++ [constructor instr]
-  tell $ toLog "    call-emit: " instrs
   pure $ fmap I instrs
 
 callIntrinsics :: String -> InstrGen [LLVMInstr]
@@ -449,10 +477,10 @@ compileInstr (S.I64Store8 memArg) = compileMem2Instr S.BS64 boomwi memArg
 compileInstr (S.I64Store16 memArg) = compileMem2Instr S.BS64 boomwi memArg
 compileInstr (S.I64Store32 memArg) = compileMem2Instr S.BS64 boomwi memArg
 
---LLVM: ??
---compileInstr S.CurrentMemory = compileMem2Instr S.BS64 boomwi 
---LLVM: Alloca
-compileInstr S.GrowMemory = compileMemGrow towi 
+----LLVM: ??
+----compileInstr S.CurrentMemory = compileMem2Instr S.BS64 boomwi 
+----LLVM: Alloca
+--compileInstr S.GrowMemory = compileMemGrow towi 
 
 
 compileInstr instr = F.fail $ "not implemented: " ++ show instr
@@ -479,7 +507,7 @@ compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalInstrGen instrGen initExprST
   where
-    initExprST = InstrST M.empty 0 0 [] M.empty M.empty M.empty
+    initExprST = InstrST M.empty 0 0 indx [] M.empty M.empty M.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     -- split the list of `LLVMObj` into blocks by looking for terminators. The

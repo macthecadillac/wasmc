@@ -16,6 +16,7 @@ import Data.Maybe
 import qualified Data.List as L
 import Data.Tuple
 import qualified LLVM.AST as AST
+import qualified LLVM.AST.AddrSpace as Addr
 import qualified LLVM.AST.Constant as Constant
 import qualified LLVM.AST.Operand as Op
 import qualified LLVM.AST.Name as Name
@@ -33,6 +34,7 @@ data OperandStack = OpS { currentBlock :: [AST.Operand]
 data InstrST = InstrST { operandStack :: M.Map Name.Name OperandStack -- stack of operands associated to a block
                        , localIdentifier :: Natural
                        , blockIdentifier :: Natural
+                       , funcIdentifier :: Natural
                        , blockScopeStack :: [Name.Name]
                        , renameMap :: M.Map Name.Name Name.Name
                        , localConst :: NestedMap Constant.Constant  -- the constants associated with the identifier of the incoming block
@@ -174,6 +176,12 @@ pushOperand op = do
 pushOperands :: [AST.Operand] -> InstrGen ()
 pushOperands = mapM_ pushOperand
 
+peekOperand :: InstrGen ([AST.Named AST.Instruction], AST.Operand)
+peekOperand = do
+  (phi, op) <- popOperand
+  pushOperand op
+  pure (phi, op)
+
 deleteOperandStack :: Name.Name -> InstrGen ()
 deleteOperandStack name = do
   st@InstrST { operandStack } <- get
@@ -184,24 +192,24 @@ branchOperandStack origin dest = do
   InstrST { operandStack, localIdentifier } <- get
   let originStack  = fromMaybe (OpS [] M.empty) $ M.lookup origin operandStack
       (OpS st m)   = fromMaybe (OpS [] M.empty) $ M.lookup dest operandStack
-  (n, instrs, ops) <- liftEither $ collapseStacks localIdentifier originStack
+  (n, phis, ops) <- liftEither $ collapseStacks localIdentifier originStack
   let destStack    = OpS st $ M.insert origin ops m
   modify $ \st -> st { operandStack = M.insert dest destStack operandStack
                      , localIdentifier = n }
-  pure instrs
+  pure phis
 
 moveOperandStack :: Name.Name -> Name.Name -> InstrGen [AST.Named AST.Instruction]
 moveOperandStack origin dest = do
-  instrs <- branchOperandStack origin dest
+  phis <- branchOperandStack origin dest
   deleteOperandStack origin
-  pure instrs
+  pure phis
 
 collapseStacks :: Natural -> OperandStack -> Either String (Natural, [AST.Named AST.Instruction], [AST.Operand])
 collapseStacks n (OpS stack map) = do
   stacks         <- transpose $ toTupleList map
   (combined, n') <- runExcept $ runStateT (traverse combine stacks) n
-  let (instrs, operands) = unzip combined
-  pure (n', instrs, stack ++ operands)
+  let (phis, operands) = unzip combined
+  pure (n', phis, stack ++ operands)
     where
       combine []                 = liftEither $ Left "empty sub-stack"
       combine ops@((fstOp, _):_) = do
@@ -249,11 +257,30 @@ returnOperandStackItems = do
   InstrST { operandStack, blockIdentifier, localIdentifier } <- get
   let blockID    = makeName "block" blockIdentifier
       localStack = fromMaybe (OpS [] M.empty) $ M.lookup blockID operandStack
-  (n, instrs, ops) <- liftEither $ collapseStacks localIdentifier localStack
+  (n, phis, ops) <- liftEither $ collapseStacks localIdentifier localStack
   modify $ \st -> st { localIdentifier = n }
-  ret              <- collapseOps ops
-  pure (instrs, AST.Do $ AST.Ret ret [])
+  (instrs, ret)  <- collapseOps ops
+  pure (phis ++ instrs, AST.Do $ AST.Ret ret [])
     where
-      collapseOps []  = pure Nothing
-      collapseOps [x] = pure $ Just x
-      collapseOps _   = F.fail "multiple ret vals not implemented"
+      collapseOps []  = pure ([], Nothing)
+      collapseOps [x] = pure ([], Just x)
+      collapseOps ops = do
+        index                        <- gets funcIdentifier
+        FT { arguments, returnType } <- asks (flip (M.!) index . functionTypes)
+        let nOps      = length arguments
+            ptrIdent  = makeName "local" $ fromIntegral nOps
+            ptrType   = Type.PointerType returnType $ Addr.AddrSpace 0
+            ptr       = AST.LocalReference ptrType ptrIdent
+            geteltptr = do
+              i <- [0..nOps - 1]
+              let idx = AST.ConstantOperand $ Constant.Int 32 $ fromIntegral i
+              pure $ AST.GetElementPtr False ptr [idx] []
+        constrs <- traverse newInstructionConstructor $ AST.elementTypes returnType
+        let getPtrInstrs = constrs <*> geteltptr
+            genStoreInstr val = do
+              (_, addr) <- popOperand  -- no phi
+              pure $ AST.Do $ AST.Store False addr val Nothing 0 []
+        storeInstrs <- traverse genStoreInstr ops
+        let instrs = getPtrInstrs ++ storeInstrs
+        tell $ toLog "    collapse-ops: " instrs
+        pure (instrs, Nothing)
