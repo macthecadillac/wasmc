@@ -186,48 +186,43 @@ compileCastOp op t = do
   pure $ fmap I instrs
 
 compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
-compileFunctionCall name args retType@(Type.StructureType { Type.elementTypes }) = do
-  let ptrTy  = Type.PointerType retType $ Addr.AddrSpace 0 -- default addr
-  constr     <- newInstructionConstructor ptrTy
-  (_, ptr)   <- peekOperand  -- no phi since it was created right here
-  let allocInstr = constr $ AST.Alloca ptrTy Nothing 0 []
-  tell $ toLog "    call-emit: " [allocInstr]
-  callInstrs <- singleReturnCall name (args ++ [ptrTy]) Type.VoidType
-  tell $ toLog "          " callInstrs
-  let nRets         = length elementTypes
-      geteltptr = do
-        i <- [0..nRets - 1]
-        let op    = AST.ConstantOperand $ Constant.Int 32 $ fromIntegral i
-            instr = AST.GetElementPtr False ptr [op] []
-        pure instr
-  constrs <- traverse newInstructionConstructor elementTypes
-  let getPtrInstrs = constrs <*> geteltptr
-      loadInstr t = do
-        (_, ptr) <- popOperand  -- the operand was created right here
-        constr   <- newInstructionConstructor t
-        pure $ constr $ AST.Load False ptr Nothing 0 []
-  loadInstrs <- traverse loadInstr elementTypes
-  let cleanUpInstrs = getPtrInstrs ++ loadInstrs
-  tell $ toLog "          " cleanUpInstrs
-  pure $ [I allocInstr] ++ callInstrs ++ fmap I cleanUpInstrs
-compileFunctionCall name args retType = singleReturnCall name args retType
+compileFunctionCall name args = aux
+  where
+    aux retType@(Type.StructureType { Type.elementTypes }) = do
+      let ptrTy  = Type.PointerType retType $ Addr.AddrSpace 0 -- default addr
+      constr     <- newInstructionConstructor ptrTy
+      (_, ptr)   <- peekOperand  -- no phi since it was created right here
+      let allocInstr = constr $ AST.Alloca ptrTy Nothing 0 []
+      tell $ toLog "    call-emit: " [allocInstr]
+      callInstrs <- singleReturnCall (args ++ [ptrTy]) Type.VoidType
+      tell $ toLog "          " callInstrs
+      let genInstr (i, t) = do
+            let idx         = AST.ConstantOperand $ Constant.Int 32 i
+                getPtrInstr = AST.GetElementPtr False ptr [idx] []
+            constr    <- newInstructionConstructor t
+            (_, addr) <- popOperand  -- no phi
+            let loadInstr = AST.Do $ AST.Load False addr Nothing 0 []
+            pure [constr getPtrInstr, loadInstr]
+      pushStackInstrs <- fmap join $ traverse genInstr $ zip [0..] elementTypes
+      tell $ toLog "          " pushStackInstrs
+      pure $ [I allocInstr] ++ callInstrs ++ fmap I pushStackInstrs
+    aux retType = singleReturnCall args retType
 
-singleReturnCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
-singleReturnCall name arguments returnType = do
-  let nArgs                        = fromIntegral (L.length arguments)
-      function                     = AST.ConstantOperand
-                                   $ flip Constant.GlobalReference name 
-                                   $ Type.FunctionType returnType arguments False
-  -- pop the required number of operands off the `operandStack` and
-  -- collect the results into a list. `replicateM` deals with the
-  -- InstrGen monad.
-  ops         <- replicateM (fromIntegral nArgs) popOperand
-  let (phis, args) = unzip ops
-      arguments    = reverse [(operand, []) | operand <- args]
-      instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
-  constructor <- newInstructionConstructor returnType
-  let instrs = concat phis ++ [constructor instr]
-  pure $ fmap I instrs
+    singleReturnCall arguments returnType = do
+      let nArgs    = fromIntegral (L.length arguments)
+          function = AST.ConstantOperand
+                   $ flip Constant.GlobalReference name 
+                   $ Type.FunctionType returnType arguments False
+      -- pop the required number of operands off the `operandStack` and
+      -- collect the results into a list. `replicateM` deals with the
+      -- InstrGen monad.
+      ops         <- replicateM (fromIntegral nArgs) popOperand
+      let (phis, args) = unzip ops
+          arguments    = reverse [(operand, []) | operand <- args]
+          instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
+      constructor <- newInstructionConstructor returnType
+      let instrs = concat phis ++ [constructor instr]
+      pure $ fmap I instrs
 
 callIntrinsics :: String -> InstrGen [LLVMInstr]
 callIntrinsics name = do
@@ -237,6 +232,7 @@ callIntrinsics name = do
 compileInstr :: S.Instruction Natural -> InstrGen [LLVMInstr]
 compileInstr S.Unreachable          = pure [T $ AST.Do $ AST.Unreachable []]
 compileInstr S.Nop                  = pure []
+compileInstr S.Drop                 = popOperand $> []
 
 compileInstr (S.IUnOp bs S.IClz)    = pushOperand false *> callIntrinsics ("llvm.ctlz.i" ++ sBitSize bs)
 compileInstr (S.IUnOp bs S.ICtz)    = pushOperand false *> callIntrinsics ("llvm.cttz.i" ++ sBitSize bs)
@@ -254,7 +250,7 @@ compileInstr (S.FUnOp bs S.FSqrt)    = callIntrinsics $ "llvm.sqrt.f" ++ sBitSiz
 compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) *> compileInstr (S.IRelOp S.BS32 S.IEq)
 compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) *> compileInstr (S.IRelOp S.BS64 S.IEq)
 
-compileInstr S.I32WrapI64            = F.fail "not implemented: S.I32WrapI64"
+compileInstr S.I32WrapI64            = throwError "not implemented: S.I32WrapI64"
 compileInstr S.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
 compileInstr S.I64ExtendUI32         = compileCastOp AST.ZExt Type.i64
 compileInstr (S.ITruncFU _ bs)       = compileCastOp AST.SIToFP $ iBitSize bs
@@ -317,48 +313,61 @@ compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegr
 compileInstr (S.F32Const n)        = compileConst $ Constant.Float $ Float.Single n
 compileInstr (S.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
 
-compileInstr (S.SetGlobal n)       = F.fail "not implemented: SetGlobal"
-compileInstr (S.TeeLocal n)        = F.fail "not implemented: TeeLocal"
-compileInstr (S.SetLocal n)        = do
+compileInstr (S.SetGlobal n)       = throwError "not implemented: SetGlobal"
+compileInstr (S.TeeLocal n)        = do
   -- if there is a constant associated to the variable, remove it
   let ident = makeName "local" n
   unassignConstant ident
-  (phi, a) <- popOperand
+  (phi, a) <- peekOperand
   case a of
     (AST.LocalReference _ name) -> addRenameAction name ident
     (AST.ConstantOperand const) -> assignConstant ident const
-    _                           -> F.fail "unsupported operand"
+    _                           -> throwError "unsupported operand"
   tell ["    emit: " ++ show phi]
   pure $ I <$> phi
 
-compileInstr (S.GetGlobal n)       = F.fail "not implemented: GetGlobal"
+compileInstr (S.SetLocal n)        = do
+  instr <- compileInstr (S.TeeLocal n)
+  _     <- compileInstr (S.Drop)  -- drop doesn't return anything
+  pure instr
+
+compileInstr (S.GetGlobal n)       = throwError "not implemented: GetGlobal"
 
 -- `<|>` is the choice operator. It tries the first branch, and if it fails,
 -- goes on to try the second branch.
-compileInstr (S.GetLocal n)        = const <|> ref
+compileInstr (S.GetLocal n)        = inBlockConst <|> outOfBlockConst <|> reference
   where
-    name = makeName "local" n
-    withMsg = maybe (F.fail $ "unbound reference: " ++ show name) pure
-    ref = do
+    inBlockConst    = do
+      constMap  <- gets localConst
+      blockID   <- gets $ makeName "block" . blockIdentifier
+      constants <- withMsg $ M.lookup name constMap
+      c         <- liftMaybe "no constants found." $ M.lookup blockID constants
+      pushOperand (AST.ConstantOperand c)
+      pure []
+
+    outOfBlockConst = do
+      InstrST { localVariableTypes, localConst } <- get
+      blockID     <- gets $ makeName "block" . blockIdentifier
+      varType     <- withMsg $ M.lookup name localVariableTypes
+      constants   <- withMsg $ M.lookup name localConst
+      case M.assocs constants of
+        []       -> throwError "no constants found"
+        [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
+        l        -> do constructor <- newInstructionConstructor varType
+                       let operand = first AST.ConstantOperand . swap <$> l
+                           instrs  = [constructor $ AST.Phi varType operand []]
+                       tell $ toLog "    emit: " instrs
+                       pure $ I <$> instrs
+
+    reference = do
       InstrST { localVariableTypes } <- get
       operand <- withMsg $ AST.LocalReference <$> M.lookup name localVariableTypes <*> pure name
       pushOperand operand
       pure []
-    const = do
-      InstrST { localVariableTypes, localConst, blockIdentifier } <- get
-      varType     <- withMsg $ M.lookup name localVariableTypes
-      constants   <- withMsg $ M.lookup name localConst
-      let outofblockInstr = case M.assocs constants of
-                              []       -> F.fail "no constants found"
-                              [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
-                              l        -> do constructor <- newInstructionConstructor varType
-                                             let operand = first AST.ConstantOperand . swap <$> l
-                                                 instrs  = [constructor $ AST.Phi varType operand []]
-                                             tell $ toLog "    emit: " instrs
-                                             pure $ I <$> instrs
-          inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
-          blockID         = makeName "block" blockIdentifier
-      maybe outofblockInstr inblockInstr $ M.lookup blockID constants
+
+    name      = makeName "local" n
+    liftMaybe = \msg -> maybe (throwError msg) pure
+    withMsg   = liftMaybe $ "unbound reference: " ++ show name
 
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
@@ -483,7 +492,7 @@ compileInstr (S.I64Store32 memArg) = compileMem2Instr S.BS64 boomwi memArg
 --compileInstr S.GrowMemory = compileMemGrow towi 
 
 
-compileInstr instr = F.fail $ "not implemented: " ++ show instr
+compileInstr instr = throwError $ "not implemented: " ++ show instr
 
 
 compileType :: S.ValueType -> Type.Type
