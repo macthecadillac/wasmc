@@ -268,6 +268,6 @@ returnOperandStackItems = do
               (_, addr) <- popOperand  -- no phi
               let storeInstr = AST.Do $ AST.Store False addr op Nothing 0 []
               pure [constr getPtrInstr, storeInstr]
-        instrs <- traverse genInstr $ zip3 [0..] ops $ AST.elementTypes returnType
-        tell $ toLog "    collapse-ops: " $ join instrs
-        pure (join instrs, Nothing)
+        instrs <- foldMap genInstr $ zip3 [0..] ops $ AST.elementTypes returnType
+        tell $ toLog "    collapse-ops: " instrs
+        pure (instrs, Nothing)

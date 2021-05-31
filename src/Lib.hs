@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
-import Control.Applicative ((<|>))
+import Control.Applicative
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
@@ -215,7 +215,7 @@ compileFunctionCall name args = aux
                 (_, addr) <- popOperand  -- no phi
                 loadInstr <- newInstructionConstructor t <*> (pure $ AST.Load False addr Nothing 0 [])
                 pure [ptrInstr, loadInstr]
-          pushStackInstrs <- fmap join $ traverse genInstr $ zip [0..] elementTypes
+          pushStackInstrs <- foldMap genInstr $ zip [0..] elementTypes
           tell $ toLog "          " pushStackInstrs
           pure $ fmap I pushStackInstrs
 
@@ -410,9 +410,9 @@ compileInstr (S.If _ b1 b2) = do
   incrBlockIdentifier
   pushScope endIf
   thenInstrs      <- branchOperandStack originID b1Ident
-  b1Compiled      <- concat <$> traverse compileInstr (appendTerm b1)
+  b1Compiled      <- foldMap compileInstr $ appendTerm b1
   _               <- moveOperandStack originID b2Ident  -- same instrs as thenInstrs
-  b2Compiled      <- concat <$> traverse compileInstr (appendTerm b2)
+  b2Compiled      <- foldMap compileInstr $ appendTerm b2
   popScope
   let term = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
   tell $ toLog "    if-emit: " $ phiP ++ thenInstrs
@@ -451,7 +451,7 @@ compileInstr (S.Block _ body) = do
       numberOfBlocks = countTerminals wasmInstrs
       endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks
   pushScope endOfBlock
-  compiled <- concat <$> traverse compileInstr wasmInstrs
+  compiled <- foldMap compileInstr wasmInstrs
   popScope
   tell $ ["  end block"]
   pure compiled
@@ -467,7 +467,7 @@ compileInstr (S.Loop _ body) = do
       start          = T $ AST.Do $ AST.Br startOfBlock []
   pushScope endOfBlock
   pushScope startOfBlock
-  compiled <- concat <$> traverse compileInstr wasmInstrs
+  compiled <- foldMap compileInstr wasmInstrs
   popScope
   popScope
   tell $ ["  end loop"]
@@ -557,7 +557,7 @@ compileFunction indx func = evalInstrGen instrGen initExprST
             pure (makeName "local" n, t)
       modify $ \st -> st { localVariableTypes = M.fromAscList localVariables }
       -- compile basic blocks and collect the results
-      instrs              <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
+      instrs              <- foldMap compileInstr $ Language.Wasm.Structure.body func
       llvmInstrs          <- renameInstrs instrs
       (phis, returnInstr) <- returnOperandStackItems
       let blks = splitAfter isTerm
@@ -611,7 +611,7 @@ compileGlobals index global = undefined
   --   name       = makeName "global" index
   --   isConstant = isConst $ S.globalType global
   --   type'      = compileType' $ S.globalType global
-  --   exp        = fmap concat $ traverse compileInstr $ S.initializer global
+  --   exp        = foldMap compileInstr $ S.initializer global
   --   -- TODO: maybe there's a way around this? The wasm specs says
   --   -- the initializer should be `expr` which could really be
   --   -- anything. Not sure how to implement that into LLVM though.
