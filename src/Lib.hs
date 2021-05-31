@@ -188,24 +188,37 @@ compileCastOp op t = do
 compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
 compileFunctionCall name args = aux
   where
-    aux retType@(Type.StructureType { Type.elementTypes }) = do
-      let ptrTy  = Type.PointerType retType $ Addr.AddrSpace 0 -- default addr
-      constr     <- newInstructionConstructor ptrTy
-      (_, ptr)   <- peekOperand  -- no phi since it was created right here
-      let allocInstr = constr $ AST.Alloca ptrTy Nothing 0 []
-      tell $ toLog "    call-emit: " [allocInstr]
-      callInstrs <- singleReturnCall (args ++ [ptrTy]) Type.VoidType
-      tell $ toLog "          " callInstrs
-      let genInstr (i, t) = do
-            let idx         = AST.ConstantOperand $ Constant.Int 32 i
-                getPtrInstr = AST.GetElementPtr False ptr [idx] []
-            constr    <- newInstructionConstructor t
-            (_, addr) <- popOperand  -- no phi
-            let loadInstr = AST.Do $ AST.Load False addr Nothing 0 []
-            pure [constr getPtrInstr, loadInstr]
-      pushStackInstrs <- fmap join $ traverse genInstr $ zip [0..] elementTypes
-      tell $ toLog "          " pushStackInstrs
-      pure $ [I allocInstr] ++ callInstrs ++ fmap I pushStackInstrs
+    -- `<>` is the "summation" operator over the semigroup. It's a
+    -- generalization of `++` for lists and `+`/`*` for numbers
+    aux retType@(Type.StructureType { Type.elementTypes }) = alloc <> singleRet <> pushStack
+      where
+        ptrTy  = Type.PointerType retType $ Addr.AddrSpace 0 -- default addr
+
+        alloc = do
+          constr     <- newInstructionConstructor ptrTy
+          let allocInstr = constr $ AST.Alloca ptrTy Nothing 0 []
+          tell $ toLog "    call-emit: " [allocInstr]
+          pure [I allocInstr]
+
+        singleRet = do
+          callInstrs <- singleReturnCall (args ++ [ptrTy]) Type.VoidType
+          tell $ toLog "          " callInstrs
+          pure callInstrs
+
+        pushStack = do
+          (_, ptr)   <- popOperand  -- no phi since there is no branching since alloc
+          let genInstr (i, t) = do
+                let idx          = AST.ConstantOperand $ Constant.Int 32 i
+                    unamedGetPtr = AST.GetElementPtr False ptr [idx] []
+                    ptrType      = Type.PointerType t $ Addr.AddrSpace 0
+                ptrInstr  <- newInstructionConstructor ptrType <*> pure unamedGetPtr
+                (_, addr) <- popOperand  -- no phi
+                loadInstr <- newInstructionConstructor t <*> (pure $ AST.Load False addr Nothing 0 [])
+                pure [ptrInstr, loadInstr]
+          pushStackInstrs <- fmap join $ traverse genInstr $ zip [0..] elementTypes
+          tell $ toLog "          " pushStackInstrs
+          pure $ fmap I pushStackInstrs
+
     aux retType = singleReturnCall args retType
 
     singleReturnCall arguments returnType = do
@@ -239,16 +252,16 @@ compileInstr (S.IUnOp bs S.ICtz)    = pushOperand false *> callIntrinsics ("llvm
 compileInstr (S.IUnOp bs S.IPopcnt) = callIntrinsics $ "llvm.ctpop.i" ++ sBitSize bs
 
 compileInstr (S.FUnOp bs S.FAbs)     = callIntrinsics $ "llvm.fabs.f" ++ sBitSize bs
-compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) *> compileInstr (S.FBinOp S.BS32 S.FMul)
-compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) *> compileInstr (S.FBinOp S.BS64 S.FMul)
+compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) <> compileInstr (S.FBinOp S.BS32 S.FMul)
+compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) <> compileInstr (S.FBinOp S.BS64 S.FMul)
 compileInstr (S.FUnOp bs S.FCeil)    = callIntrinsics $ "llvm.ceil.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FFloor)   = callIntrinsics $ "llvm.floor.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FTrunc)   = callIntrinsics $ "llvm.trunc.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FNearest) = callIntrinsics $ "llvm.roundeven.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FSqrt)    = callIntrinsics $ "llvm.sqrt.f" ++ sBitSize bs
 
-compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) *> compileInstr (S.IRelOp S.BS32 S.IEq)
-compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) *> compileInstr (S.IRelOp S.BS64 S.IEq)
+compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) <> compileInstr (S.IRelOp S.BS32 S.IEq)
+compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) <> compileInstr (S.IRelOp S.BS64 S.IEq)
 
 compileInstr S.I32WrapI64            = throwError "not implemented: S.I32WrapI64"
 compileInstr S.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
@@ -424,7 +437,7 @@ compileInstr (S.BrIf i)     = do
   let origin      = makeName "block" blockIndx
       fallthrough = makeName "block" $ blockIndx + 1
   brInstrs        <- branchOperandStack origin dest
-  _               <- moveOperandStack origin fallthrough  -- same instrs as thenInstrs
+  _               <- moveOperandStack origin fallthrough
   incrBlockIdentifier
   let term = AST.Do $ AST.CondBr operand dest fallthrough []
   tell $ toLog "    brif-emit: " $ phiP ++ brInstrs

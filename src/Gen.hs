@@ -56,6 +56,18 @@ newtype ModGen a = ModGen { _modGen :: ExceptT String (ReaderT ModEnv (Writer [S
 newtype InstrGen a = InstrGen { _funcGen :: StateT InstrST ModGen a }
   deriving (Functor, Applicative, Alternative, Monad, MonadReader ModEnv, MonadWriter [String], MonadError String, MonadState InstrST)
 
+instance (Semigroup a) => Semigroup (ModGen a) where
+  a <> b = (<>) <$> a <*> b
+
+instance (Monoid a) => Monoid (ModGen a) where
+  mempty = pure mempty
+
+instance (Semigroup a) => Semigroup (InstrGen a) where
+  a <> b = (<>) <$> a <*> b
+
+instance (Monoid a) => Monoid (InstrGen a) where
+  mempty = pure mempty
+
 -- helper functions. Not entirely following Haskell conventions here.
 evalModGen :: ModGen a -> ModEnv -> Either String a
 evalModGen a r = first (\e -> "Error: " ++ e ++ log) val
