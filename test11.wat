@@ -1,0 +1,12 @@
+(module
+  (table 2 funcref)
+  (memory 10)
+  (start $main)
+  (elem (i32.const 0) $f)
+  (elem (i32.const 1) $g)
+  (type $_0 (func (param i32) (param i32) (result i32)))
+  (type $_1 (func (param i32)))
+  (func $f (param $x i32))
+  (func $g)
+  (func $main)
+  )

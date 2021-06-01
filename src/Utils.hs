@@ -14,10 +14,10 @@ import LLVM.AST.Name
 import LLVM.AST.Type
 import Numeric.Natural
 
-appendIfLast :: (a -> Bool) -> a -> [a] -> [a]
+appendIfLast :: (Show a) => (a -> Bool) -> a -> [a] -> [a]
 appendIfLast f a = reverse . aux . reverse
   where
-    aux []      = []
+    aux []      = [a]
     aux l@(x:_) | f x       = a : l
                 | otherwise = l
 

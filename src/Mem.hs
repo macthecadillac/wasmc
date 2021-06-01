@@ -24,7 +24,7 @@ import qualified LLVM.AST.Type as Type
 
 
 llvmMalloc :: M.Map String FunctionType
-llvmMalloc = M.fromList [("malloc", FT [Type.i32, Type.i32] (Type.ptr Type.void)),
+llvmMalloc = M.fromList [("malloc", FT [Type.i64] (Type.ptr Type.void)),
                          ("free", FT [Type.ptr Type.void] Type.void)]
 
 -- declarations of LLVM intrinsic functions

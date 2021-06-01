@@ -375,23 +375,22 @@ compileInstr (S.Call i) = do
   compileFunctionCall name arguments returnType
 
 compileInstr (S.CallIndirect i) = do
-  -- load from the table what's in index i
-  -- let instrs = [AST.Load "False" (opConstr (Type.NamedTypeReference "table") ()) Nothing 8 []]
-  let getAddr = {-address of the function-} AST.GetElementPtr True tableRef [idx] []
-  ptrInstr  <- newInstructionConstructor (Type.ptr (Type.NamedTypeReference "table")) <*> pure getAddr
-  (_, addr) <- popOperand  -- no phi
-  loadInstr <- newInstructionConstructor (Type.ptr (Type.FunctionType Type.i32 [] False)) <*> pure (AST.Load False addr Nothing 8 [])
-  (_, func) <- popOperand
-  -- retType   <- asks $ returnType . flip (M.!) funcID . functionTypes
-  callInstr <- newInstructionConstructor Type.i32 <*> pure (AST.Call Nothing Conv.C [] (Right func) [] [] [])
+  funcTypeMap                  <- asks functionTypes
+  FT { arguments, returnType } <- liftMaybe $ M.lookup i funcTypeMap
+  (phiI, idx)                  <- popOperand
+  tableRef                     <- asks tableReference
+  let getAddr = AST.GetElementPtr True tableRef [idx] []  -- address of the function
+      refType = Type.ptr (Type.NamedTypeReference "table")
+  ptrInstr    <- newNamedInstruction refType getAddr
+  (_, addr)   <- popOperand  -- no phi
+  let funcPtrType = Type.ptr $ Type.FunctionType returnType arguments False
+  loadInstr   <- newNamedInstruction funcPtrType $ AST.Load False addr Nothing 0 []
+  (_, func)   <- popOperand
+  callInstr   <- newNamedInstruction returnType $ AST.Call Nothing Conv.C [] (Right func) [] [] []
   pure $ fmap I [ptrInstr, loadInstr, callInstr]
-  -- pure $ fmap I [ptrInstr]
-  -- pure []
     where
-      idx = AST.ConstantOperand $ Constant.Int 32 $ fromIntegral i
-      tableRef = opConstr (Type.ptr $ Type.NamedTypeReference "Table") "table"
-      opConstr t name = Operand.ConstantOperand $ Constant.GlobalReference t name
-  -- call that function
+      llvmize FT { arguments, returnType } = Type.FunctionType returnType arguments False
+      liftMaybe = maybe (throwError "not a known function type") pure
 
 compileInstr S.Return = do
   (phi, term) <- returnOperandStackItems
@@ -578,8 +577,6 @@ compileFunction indx func = evalInstrGen instrGen initExprST
       let blks = splitAfter isTerm
                $ appendIfLast (not . isRet) (T returnInstr)
                $ llvmInstrs ++ fmap I phis
-          -- TODO: conditional additional block if the last item is a block and
-          -- requested a jump to an additional block
           basicBlocks = fmap (buildBlock . assignName)
                       $ zip [0..]
                       $ fromMaybe (error "empty block")
@@ -591,7 +588,7 @@ compileFunction indx func = evalInstrGen instrGen initExprST
 
     buildBlock (name, term, instrs) = AST.BasicBlock name (unwrapI <$> instrs) (unwrapT term)
 
-    isRet (T ((AST.:=) _ (AST.Ret _ _))) = True
+    isRet (T (AST.Do (AST.Ret _ _))) = True
     isRet _                              = False
 
     unwrapT (T t) = t
@@ -763,10 +760,10 @@ compileElements elements = initTable
 compileLoadOp :: Natural -> Type.Type -> InstrGen [LLVMInstr]
 compileLoadOp alignment valType = do
   (phi, addr) <- popOperand
-  let addrType = Type.ptr $ operandType addr
-      algn     = fromIntegral alignment
+  let algn     = fromIntegral alignment
+      ptrType  = Type.ptr valType
   memRef      <- asks memoryReference
-  getEltPtr   <- newNamedInstruction addrType $ AST.GetElementPtr True memRef [addr] []
+  getEltPtr   <- newNamedInstruction ptrType $ AST.GetElementPtr True memRef [addr] []
   (_, ptr)    <- popOperand  -- no phi
   loadInstr   <- newNamedInstruction valType $ AST.Load False ptr Nothing algn []
   let instrs = phi ++ [getEltPtr, loadInstr]
@@ -784,7 +781,8 @@ compileStoreOp alignment valType = do
       ptrType  = Type.ptr valType
   memRef       <- asks memoryReference
   getEltPtr    <- newNamedInstruction ptrType $ AST.GetElementPtr True memRef [addr] []
-  let storeInstr = AST.Do $ AST.Store False addr val Nothing algn []
+  (_, ptr)     <- popOperand
+  let storeInstr = AST.Do $ AST.Store False ptr val Nothing algn []
       instrs     = phiV ++ phiA ++ [getEltPtr, storeInstr]
   tell $ toLog "    emit: " instrs
   pure $ fmap I instrs
@@ -805,34 +803,58 @@ compileModule wasmMod = evalModGen modGen initModEnv
     startFunctionIndex  = (\(S.StartFunction n) -> n) <$> S.start wasmMod
     extractFuncType     = compileFunctionType . (S.types wasmMod !!) . fromIntegral . S.funcType
     functionTypes       = M.fromList $ zip [0..] $ extractFuncType <$> S.functions wasmMod
-    memoryReference     = AST.ConstantOperand
-                        $ flip Constant.GlobalReference (Name.mkName "memory")
+    ref name typeName   = AST.ConstantOperand 
+                        $ flip Constant.GlobalReference (Name.mkName name)
                         $ Type.ptr
-                        $ Type.NamedTypeReference "Memory"
-    initModEnv          = ModEnv startFunctionIndex functionTypes memoryReference
+                        $ Type.NamedTypeReference typeName
+    memoryReference     = ref "memory" "Memory"
+    tableReference      = ref "table" "Table"
+    initModEnv          = ModEnv { startFunctionIndex
+                                 , functionTypes
+                                 , memoryReference
+                                 , tableReference
+                                 }
     wasmGlobals         = zip [0..] $ S.globals wasmMod
-    wasmTables          = zip [0..] $ S.tables wasmMod
-    wasmElements        = S.elems wasmMod 
     wasmFuncs           = zip [0..] $ S.functions wasmMod
+    wasmElements        = S.elems wasmMod
+    (minSize, maxSize)  = (\(S.Memory (S.Limit n x)) -> (n, x)) $ head $ S.mems wasmMod
 --  wasmImports         = zip [0..] $ S.imports wasmMod
-    -- wasmMem
+
+    unwrap              = maybe (throwError "type mismatch") (pure . fst) . L.uncons
     modGen              = do
-      globals <- traverse (uncurry compileGlobals) wasmGlobals
-      table   <- traverse (uncurry compileTable) wasmTables
-      -- tablef  <- compileElements wasmElements
+      -- set up table
+      elemInds <- traverse unwrap [index | S.ElemSegment _ _ index <- wasmElements]
+      let tableType    = do i <- elemInds
+                            let FT { arguments, returnType } = functionTypes M.! fromIntegral i
+                            pure $ Type.ptr $ Type.FunctionType returnType arguments False
+          tableRefType = AST.StructureType False tableType
+          elemNames    = makeName "func" . fromIntegral <$> elemInds
+          tableElems   = uncurry Constant.GlobalReference <$> zip tableType elemNames
+          tableInit    = Constant.Struct Nothing False tableElems
+          table        = AST.globalVariableDefaults { Global.name = "table"
+                                                    , Global.isConstant = True
+                                                    , Global.type' = tableRefType
+                                                    , Global.initializer = Just tableInit
+                                                    }
+
+      -- set up memory
+      let memory = AST.globalVariableDefaults { Global.name = "memory"
+                                              , Global.type' = Type.ptr Type.i8
+                                              , Global.initializer = Nothing
+                                              }
+
+      globals  <- traverse (uncurry compileGlobals) wasmGlobals
       -- imports <- traverse (uncurry compileImports) wasmImports
-      defs    <- traverse (uncurry compileFunction) wasmFuncs
-      pure $ AST.defaultModule
-        { AST.moduleName = "basic",
-          AST.moduleDefinitions =
-            (AST.GlobalDefinition <$> (llvmIntrinsics ++ defs ++ table)) ++
-            [
-              -- AST.TypeDefinition "Elem" (Just (AST.StructureType False [Type.i32, Type.ptr (Type.FunctionType Type.void [] False)]))
-            -- , AST.TypeDefinition "Table" (Just (AST.StructureType False [Type.ptr (Type.NamedTypeReference "Elem"), Type.i32, Type.i32]))
-              AST.TypeDefinition "Table" (Just (AST.StructureType False [Type.ptr (Type.FunctionType Type.void [] False)]))
-            , AST.TypeDefinition "Memory" (Just (AST.StructureType False [Type.ptr Type.i8, Type.i32, Type.i32, Type.i32]))
-            ] 
-        }
+      funcs    <- traverse (uncurry compileFunction) wasmFuncs
+
+      let globalDefs = AST.GlobalDefinition <$> table : memory : llvmIntrinsics ++ funcs
+          typeDefs   = [ AST.TypeDefinition "Table" (Just tableRefType)
+                       , AST.TypeDefinition "Memory" (Just $ Type.ptr Type.i8)
+                       ]
+
+      pure $ AST.defaultModule { AST.moduleName = "basic"
+                               , AST.moduleDefinitions = globalDefs ++ typeDefs 
+                               }
 
 parseModule :: B.ByteString -> Either String S.Module
 parseModule = Wasm.parse

@@ -14,13 +14,16 @@ import qualified Data.Map as M
 import Data.Maybe
 import qualified Data.List as L
 import Data.Tuple
+import Debug.Trace
+import Numeric.Natural
+
 import qualified LLVM.AST as AST
 import qualified LLVM.AST.AddrSpace as Addr
 import qualified LLVM.AST.Constant as Constant
 import qualified LLVM.AST.Operand as Op
 import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Type as Type
-import Numeric.Natural
+
 import Utils (makeName, operandType, toLog)
 
 type NestedMap a = M.Map Name.Name (M.Map Name.Name a)
@@ -51,6 +54,7 @@ data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , functionTypes :: M.Map Natural FunctionType
                      , memoryReference :: AST.Operand
+                     , tableReference :: AST.Operand
                     --  , globalVariableTypes :: M.Map Natural Type.Type
                       }
                      deriving (Show)

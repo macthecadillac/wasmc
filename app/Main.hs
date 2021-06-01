@@ -18,4 +18,4 @@ main = do
   let fname = reverse $ dropWhile (/='.') $ reverse $ head fpath
   either putStrLn (IO.writeFile (fname ++ "ll") . ppllvm) $ compile src
   where
-    compile = parseModule >=> compileModule
+    compile = parseModule >=> (\ast -> compileModule (trace (show ast) ast))
