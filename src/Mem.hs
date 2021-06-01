@@ -11,10 +11,12 @@ import qualified LLVM.AST.Global as Global
 import qualified LLVM.AST.Name as Name
 import qualified LLVM.AST.Type as Type
 
+
 --true = AST.ConstantOperand $ Const.Int 1 1
 --false = AST.ConstantOperand $ Const.Int 1 0
 
 -- https://releases.llvm.org/1.1/docs/LangRef.html#i_malloc
+-- void *malloc(size_t size)
 --   <result> = malloc <type>, uint <NumElements>     ; yields {type*}:result
 --   free <type> <value>                              ; yields {void}
 -- Type.ptr - An abbreviation for PointerType t (AddrSpace 0)
@@ -22,8 +24,8 @@ import qualified LLVM.AST.Type as Type
 
 
 llvmMalloc :: M.Map String FunctionType
-llvmMalloc = M.fromList [("llvm.malloc", FT [Type.elementType Type.void, Type.i32] (Type.ptr Type.void)),
-                                 ("llvm.free", FT [Type.elementType Type.void, Type.ptr Type.void] Type.void)]
+llvmMalloc = M.fromList [("malloc", FT [Type.i32, Type.i32] (Type.ptr Type.void)),
+                         ("free", FT [Type.ptr Type.void] Type.void)]
 
 -- declarations of LLVM intrinsic functions
 llvmMallocDec :: [Global.Global]

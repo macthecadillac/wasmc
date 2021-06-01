@@ -249,7 +249,8 @@ compileInstr (S.FUnOp bs S.FSqrt)    = callIntrinsics $ "llvm.sqrt.f" ++ sBitSiz
 compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) <> compileInstr (S.IRelOp S.BS32 S.IEq)
 compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) <> compileInstr (S.IRelOp S.BS64 S.IEq)
 
-compileInstr S.I32WrapI64            = throwError "not implemented: S.I32WrapI64"
+-- not sure how to wrap integers in LLVM
+-- compileInstr S.I32WrapI64            = throwError "not implemented: S.I32WrapI64"
 compileInstr S.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
 compileInstr S.I64ExtendUI32         = compileCastOp AST.ZExt Type.i64
 compileInstr (S.ITruncFU _ bs)       = compileCastOp AST.SIToFP $ iBitSize bs
@@ -477,34 +478,36 @@ compileInstr (S.Loop _ body) = do
   tell ["  end loop"]
   pure $ start : compiled
 
-compileInstr (S.I32Load memArg) = compileMemInstr S.BS32 memArg
-compileInstr (S.I64Load memArg) = compileMemInstr S.BS64 memArg
-compileInstr (S.F32Load memArg) = compileMemInstr S.BS32 memArg
-compileInstr (S.F64Load memArg) = compileMemInstr S.BS64 memArg
-compileInstr (S.I32Load8S memArg) = compileMemInstr S.BS32 memArg
-compileInstr (S.I32Load8U  memArg) = compileMemInstr S.BS32 memArg
-compileInstr (S.I32Load16S memArg) = compileMemInstr S.BS32 memArg
-compileInstr (S.I32Load16U memArg) = compileMemInstr S.BS32 memArg
-compileInstr (S.I64Load8S  memArg) = compileMemInstr S.BS64 memArg
-compileInstr (S.I64Load8U  memArg) = compileMemInstr S.BS64 memArg
-compileInstr (S.I64Load16S memArg) = compileMemInstr S.BS64 memArg
-compileInstr (S.I64Load16U memArg) = compileMemInstr S.BS64 memArg
-compileInstr (S.I64Load32S memArg) = compileMemInstr S.BS64 memArg
-compileInstr (S.I64Load32U memArg) = compileMemInstr S.BS64 memArg
+compileInstr (S.I32Load    (S.MemArg _ algn)) = compileLoadOp algn Type.i32
+compileInstr (S.I64Load    (S.MemArg _ algn)) = compileLoadOp algn Type.i64
+compileInstr (S.F32Load    (S.MemArg _ algn)) = compileLoadOp algn Type.float
+compileInstr (S.F64Load    (S.MemArg _ algn)) = compileLoadOp algn Type.double
+-- load one byte as i8, then sign extend to i32. `<>` in this context means
+-- "then"
+compileInstr (S.I32Load8S  (S.MemArg _ algn)) = compileLoadOp algn Type.i8  <> compileCastOp AST.SExt Type.i32
+compileInstr (S.I32Load8U  (S.MemArg _ algn)) = compileLoadOp algn Type.i8  <> compileCastOp AST.ZExt Type.i32
+compileInstr (S.I32Load16S (S.MemArg _ algn)) = compileLoadOp algn Type.i16 <> compileCastOp AST.SExt Type.i32
+compileInstr (S.I32Load16U (S.MemArg _ algn)) = compileLoadOp algn Type.i16 <> compileCastOp AST.ZExt Type.i32
+compileInstr (S.I64Load8S  (S.MemArg _ algn)) = compileLoadOp algn Type.i8  <> compileCastOp AST.SExt Type.i64
+compileInstr (S.I64Load8U  (S.MemArg _ algn)) = compileLoadOp algn Type.i8  <> compileCastOp AST.ZExt Type.i64
+compileInstr (S.I64Load16S (S.MemArg _ algn)) = compileLoadOp algn Type.i16 <> compileCastOp AST.SExt Type.i64
+compileInstr (S.I64Load16U (S.MemArg _ algn)) = compileLoadOp algn Type.i16 <> compileCastOp AST.ZExt Type.i64
+compileInstr (S.I64Load32S (S.MemArg _ algn)) = compileLoadOp algn Type.i32 <> compileCastOp AST.SExt Type.i64
+compileInstr (S.I64Load32U (S.MemArg _ algn)) = compileLoadOp algn Type.i32 <> compileCastOp AST.ZExt Type.i64
 
-
-compileInstr (S.I32Store memArg) = compileMem2Instr S.BS32 memArg
-compileInstr (S.I64Store memArg) = compileMem2Instr S.BS64 memArg
-compileInstr (S.F32Store memArg) = compileMem2Instr S.BS32 memArg
-compileInstr (S.F64Store memArg) = compileMem2Instr S.BS64 memArg
-compileInstr (S.I32Store8 memArg) = compileMem2Instr S.BS32 memArg
-compileInstr (S.I32Store16 memArg) = compileMem2Instr S.BS32 memArg
-compileInstr (S.I64Store8 memArg) = compileMem2Instr S.BS64 memArg
-compileInstr (S.I64Store16 memArg) = compileMem2Instr S.BS64 memArg
-compileInstr (S.I64Store32 memArg) = compileMem2Instr S.BS64 memArg
+compileInstr (S.I32Store   (S.MemArg _ algn)) = compileStoreOp algn Type.i32
+compileInstr (S.I64Store   (S.MemArg _ algn)) = compileStoreOp algn Type.i64
+compileInstr (S.F32Store   (S.MemArg _ algn)) = compileStoreOp algn Type.float
+compileInstr (S.F64Store   (S.MemArg _ algn)) = compileStoreOp algn Type.double
+-- not sure how to wrap integers in LLVM
+-- compileInstr (S.I32Store8  (S.MemArg _ algn)) = compileStoreOp algn Type.i8
+-- compileInstr (S.I32Store16 (S.MemArg _ algn)) = compileStoreOp algn Type.i16
+-- compileInstr (S.I64Store8  (S.MemArg _ algn)) = compileStoreOp algn Type.i8
+-- compileInstr (S.I64Store16 (S.MemArg _ algn)) = compileStoreOp algn Type.i16
+-- compileInstr (S.I64Store32 (S.MemArg _ algn)) = compileStoreOp algn Type.i32
 
 --LLVM: ??
---compileInstr S.CurrentMemory = compileMem2Instr S.BS64 boomwi 
+--compileInstr S.CurrentMemory = compileStoreOp S.BS64 boomwi 
 --LLVM: Alloca
 -- compileInstr S.GrowMemory = compileMemGrow
 
@@ -757,28 +760,32 @@ compileElements elements = initTable
 -- %tmp0 = load ...
 -- %..   = add i32 ... %tmp0
 
-compileMemInstr :: S.BitSize -> S.MemArg -> InstrGen [LLVMInstr]
-compileMemInstr bs memArg = --addr algn 
-  do
-    (phi, addr) <- popOperand
-    let algn = fromIntegral $ S.align memArg
+compileLoadOp :: Natural -> Type.Type -> InstrGen [LLVMInstr]
+compileLoadOp alignment valType = do
+  (phi, addr) <- popOperand
+  let addrType = Type.ptr $ operandType addr
+      algn     = fromIntegral alignment
+  memRef      <- asks memoryReference
+  getEltPtr   <- newNamedInstruction addrType $ AST.GetElementPtr True memRef [addr] []
+  (_, ptr)    <- popOperand  -- no phi
+  loadInstr   <- newNamedInstruction valType $ AST.Load False ptr Nothing algn []
+  let instrs = phi ++ [getEltPtr, loadInstr]
+  tell $ toLog "    emit: " instrs
+  pure $ fmap I instrs
 
-    -- generate a new identifier for the intermediate result. In LLVM IR
-    -- this amounts to saving the results to a 'variable.'
-    
-    constructor <- newInstructionConstructor $ iBitSize bs
-    -- memRef      <- newInstructionConstructor $ Type.ptr (Type.NamedTypeReference "Memory")
-    let ptr    = AST.GetElementPtr True memRef [addr] []
-        instrs = phi ++ [constructor $ AST.Load False ptr Nothing algn []]
-    tell $ toLog "    emit: " instrs
-    pure $ fmap I instrs
+newNamedInstruction :: Type.Type -> AST.Instruction -> InstrGen (AST.Named AST.Instruction)
+newNamedInstruction t instr = newInstructionConstructor t <*> pure instr
 
-compileMem2Instr :: S.BitSize -> S.MemArg -> InstrGen [LLVMInstr]
-compileMem2Instr bs memArg = do
+compileStoreOp :: Natural -> Type.Type -> InstrGen [LLVMInstr]
+compileStoreOp alignment valType = do
   (phiV, val)  <- popOperand
   (phiA, addr) <- popOperand
-  let algn   = fromIntegral $ S.align memArg
-      instrs = phiV ++ phiA ++ [AST.Do $ AST.Store False addr val Nothing algn []]
+  let algn     = fromIntegral alignment
+      ptrType  = Type.ptr valType
+  memRef       <- asks memoryReference
+  getEltPtr    <- newNamedInstruction ptrType $ AST.GetElementPtr True memRef [addr] []
+  let storeInstr = AST.Do $ AST.Store False addr val Nothing algn []
+      instrs     = phiV ++ phiA ++ [getEltPtr, storeInstr]
   tell $ toLog "    emit: " instrs
   pure $ fmap I instrs
 
@@ -798,7 +805,11 @@ compileModule wasmMod = evalModGen modGen initModEnv
     startFunctionIndex  = (\(S.StartFunction n) -> n) <$> S.start wasmMod
     extractFuncType     = compileFunctionType . (S.types wasmMod !!) . fromIntegral . S.funcType
     functionTypes       = M.fromList $ zip [0..] $ extractFuncType <$> S.functions wasmMod
-    initModEnv          = ModEnv startFunctionIndex functionTypes
+    memoryReference     = AST.ConstantOperand
+                        $ flip Constant.GlobalReference (Name.mkName "memory")
+                        $ Type.ptr
+                        $ Type.NamedTypeReference "Memory"
+    initModEnv          = ModEnv startFunctionIndex functionTypes memoryReference
     wasmGlobals         = zip [0..] $ S.globals wasmMod
     wasmTables          = zip [0..] $ S.tables wasmMod
     wasmElements        = S.elems wasmMod 
@@ -809,7 +820,7 @@ compileModule wasmMod = evalModGen modGen initModEnv
       globals <- traverse (uncurry compileGlobals) wasmGlobals
       table   <- traverse (uncurry compileTable) wasmTables
       -- tablef  <- compileElements wasmElements
-      imports <- traverse (uncurry compileImports) wasmImports
+      -- imports <- traverse (uncurry compileImports) wasmImports
       defs    <- traverse (uncurry compileFunction) wasmFuncs
       pure $ AST.defaultModule
         { AST.moduleName = "basic",

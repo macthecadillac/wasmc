@@ -50,6 +50,7 @@ data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
 -- a record for per-module constants
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , functionTypes :: M.Map Natural FunctionType
+                     , memoryReference :: AST.Operand
                     --  , globalVariableTypes :: M.Map Natural Type.Type
                       }
                      deriving (Show)
@@ -61,13 +62,13 @@ newtype InstrGen a = InstrGen { _funcGen :: StateT InstrST ModGen a }
   deriving (Functor, Applicative, Alternative, Monad, MonadReader ModEnv, MonadWriter [String], MonadError String, MonadState InstrST)
 
 instance (Semigroup a) => Semigroup (ModGen a) where
-  a <> b = (<>) <$> a <*> b
+  (<>) = liftA2 (<>)
 
 instance (Monoid a) => Monoid (ModGen a) where
   mempty = pure mempty
 
 instance (Semigroup a) => Semigroup (InstrGen a) where
-  a <> b = (<>) <$> a <*> b
+  (<>) = liftA2 (<>)
 
 instance (Monoid a) => Monoid (InstrGen a) where
   mempty = pure mempty
@@ -127,7 +128,7 @@ popOperand = do
   opStack      <- gets operandStack
   localStack   <- liftMaybe $ M.lookup blockID opStack
   (op, rest)   <- liftMaybe $ uncons blockID localStack
-  operands     <- fmap . rename <$> (gets renameMap) <*> pure op
+  operands     <- gets ((fmap . rename) . renameMap) <*> pure op
   modify $ \st -> st { operandStack = M.insert blockID rest opStack }
   (instrs, op) <- combine operands
   tell $ toLog "    pop operand--emit: " instrs
@@ -206,7 +207,7 @@ collapseStacks n (OpS stack map) = do
   let (phis, operands) = unzip combined
   pure (n', phis, stack ++ operands)
     where
-      combine []                 = liftEither $ Left "empty sub-stack"
+      combine []                 = throwError "empty sub-stack"
       combine ops@((fstOp, _):_) = do
         n <- get
         let ident  = makeName "tmp" n
