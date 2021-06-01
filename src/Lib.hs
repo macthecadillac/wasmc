@@ -370,23 +370,28 @@ compileInstr (S.GetLocal n)        = inBlockConst <|> outOfBlockConst <|> refere
 
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
-  let FT { arguments, returnType } = functionTypes M.! i
+  let FT { arguments, returnType } = functionTypes M.! makeName "func" i
       name                         = makeName "func" i
   compileFunctionCall name arguments returnType
 
 compileInstr (S.CallIndirect i) = do
-  funcTypeMap                  <- asks functionTypes
-  FT { arguments, returnType } <- liftMaybe $ M.lookup i funcTypeMap
-  (phiI, idx)                  <- popOperand
-  tableRef                     <- asks tableReference
-  let getAddr = AST.GetElementPtr True tableRef [idx] []  -- address of the function
-      refType = Type.ptr (Type.NamedTypeReference "table")
-  ptrInstr    <- newNamedInstruction refType getAddr
+  funcTypeMap <- asks functionTypeIndices
+  funcType    <- liftMaybe $ M.lookup i funcTypeMap
+  (phiI, idx) <- popOperand
+  tableRef    <- asks tableReference
+  let zero    = AST.ConstantOperand $ Constant.Int 32 0
+      getAddr = AST.GetElementPtr True tableRef [zero, idx] []  -- address of the function
+      funcPtrType = Type.ptr $ llvmize funcType
+      nArgs       = fromIntegral $ L.length $ arguments funcType
+  ptrInstr    <- newNamedInstruction (Type.ptr funcPtrType) getAddr
   (_, addr)   <- popOperand  -- no phi
-  let funcPtrType = Type.ptr $ Type.FunctionType returnType arguments False
   loadInstr   <- newNamedInstruction funcPtrType $ AST.Load False addr Nothing 0 []
   (_, func)   <- popOperand
-  callInstr   <- newNamedInstruction returnType $ AST.Call Nothing Conv.C [] (Right func) [] [] []
+  ops         <- replicateM (fromIntegral nArgs) popOperand
+  let (phis, args) = unzip ops
+      arguments    = reverse [(operand, []) | operand <- args]
+      retType      = returnType funcType
+  callInstr   <- newNamedInstruction retType $ AST.Call Nothing Conv.C [] (Right func) arguments [] []
   pure $ fmap I [ptrInstr, loadInstr, callInstr]
     where
       llvmize FT { arguments, returnType } = Type.FunctionType returnType arguments False
@@ -540,10 +545,10 @@ compileRetTypeList [t] = compileType t
 compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 
 -- compiles one WASM function into an LLVM function.
-compileFunction :: Natural -> S.Function -> ModGen Global.Global
-compileFunction indx func = evalInstrGen instrGen initExprST
+compileFunction :: Name.Name -> S.Function -> ModGen Global.Global
+compileFunction ident func = evalInstrGen instrGen initExprST
   where
-    initExprST = InstrST M.empty 0 0 indx [] M.empty M.empty M.empty
+    initExprST = InstrST M.empty 0 0 ident [] M.empty M.empty M.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     -- split the list of `LLVMObj` into blocks by looking for terminators. The
@@ -553,18 +558,18 @@ compileFunction indx func = evalInstrGen instrGen initExprST
     -- `if` in WASM (and possibly other instructions). These need to be
     -- un-nested into their own blocks in LLVM.
     instrGen    = do
-      tell ["func def: " ++ show indx]
+      tell ["func def: " ++ show ident]
       ModEnv { startFunctionIndex, functionTypes } <- ask
       -- compile function type information
-      let FT { arguments, returnType } = functionTypes M.! indx
+      let FT { arguments, returnType } = functionTypes M.! ident
           paramList  = do
             (i, t) <- zip [0..] arguments
             pure $ Global.Parameter t (makeName "local" i) []
           parameters = (paramList, False)
           -- if indx == startIndex then "main" else "func{indx}". All the extra code
           -- handle the fact that startIndex may or may not have a value
-          name = maybe (makeName "func" indx) (const "main")
-            $ guard . (==indx) =<< startFunctionIndex
+          name = maybe ident (const "main")
+            $ guard . ((==ident) . makeName "func") =<< startFunctionIndex
           localTypes = compileType <$> S.localTypes func
           localVariables = do
             (n, t) <- zip [0..] $ arguments ++ localTypes
@@ -802,58 +807,61 @@ compileModule wasmMod = evalModGen modGen initModEnv
   where
     startFunctionIndex  = (\(S.StartFunction n) -> n) <$> S.start wasmMod
     extractFuncType     = compileFunctionType . (S.types wasmMod !!) . fromIntegral . S.funcType
-    functionTypes       = M.fromList $ zip [0..] $ extractFuncType <$> S.functions wasmMod
+    functionTypes       = M.fromList
+                        $ zip [makeName "func" i | i <- [0..]] 
+                        $ extractFuncType <$> S.functions wasmMod
+    functionTypeIndices = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
     ref name typeName   = AST.ConstantOperand 
                         $ flip Constant.GlobalReference (Name.mkName name)
                         $ Type.ptr
                         $ Type.NamedTypeReference typeName
-    memoryReference     = ref "memory" "Memory"
-    tableReference      = ref "table" "Table"
+    memoryReference     = ref "memory" "memory"
+    tableReference      = ref "table" "table"
     initModEnv          = ModEnv { startFunctionIndex
                                  , functionTypes
+                                 , functionTypeIndices
                                  , memoryReference
                                  , tableReference
                                  }
     wasmGlobals         = zip [0..] $ S.globals wasmMod
-    wasmFuncs           = zip [0..] $ S.functions wasmMod
+    wasmFuncs           = zip [makeName "func" i | i <- [0..]] $ S.functions wasmMod
     wasmElements        = S.elems wasmMod
     (minSize, maxSize)  = (\(S.Memory (S.Limit n x)) -> (n, x)) $ head $ S.mems wasmMod
 --  wasmImports         = zip [0..] $ S.imports wasmMod
 
-    unwrap              = maybe (throwError "type mismatch") (pure . fst) . L.uncons
     modGen              = do
       -- set up table
-      elemInds <- traverse unwrap [index | S.ElemSegment _ _ index <- wasmElements]
-      let tableType    = do i <- elemInds
-                            let FT { arguments, returnType } = functionTypes M.! fromIntegral i
+      let elemNames    = [makeName "func" i | S.ElemSegment _ _ index <- wasmElements, i <- index]
+          tableType    = do func <- elemNames
+                            let FT { arguments, returnType } = functionTypes M.! func
                             pure $ Type.ptr $ Type.FunctionType returnType arguments False
           tableRefType = AST.StructureType False tableType
-          elemNames    = makeName "func" . fromIntegral <$> elemInds
+          tableTypeDef = AST.TypeDefinition "table" $ Just tableRefType
           tableElems   = uncurry Constant.GlobalReference <$> zip tableType elemNames
           tableInit    = Constant.Struct Nothing False tableElems
           table        = AST.globalVariableDefaults { Global.name = "table"
                                                     , Global.isConstant = True
-                                                    , Global.type' = tableRefType
+                                                    , Global.type' = Type.NamedTypeReference $ Name.mkName "table"
                                                     , Global.initializer = Just tableInit
                                                     }
 
       -- set up memory
-      let memory = AST.globalVariableDefaults { Global.name = "memory"
-                                              , Global.type' = Type.ptr Type.i8
-                                              , Global.initializer = Nothing
-                                              }
+      let memoryType    = Type.ptr $ Type.i8
+      let memoryTypeDef = AST.TypeDefinition "memory" $ Just memoryType
+      let memory        = AST.globalVariableDefaults { Global.name = "memory"
+                                                     , Global.type' = Type.NamedTypeReference $ Name.mkName "memory"
+                                                     , Global.initializer = Nothing
+                                                     }
 
       globals  <- traverse (uncurry compileGlobals) wasmGlobals
       -- imports <- traverse (uncurry compileImports) wasmImports
       funcs    <- traverse (uncurry compileFunction) wasmFuncs
 
       let globalDefs = AST.GlobalDefinition <$> table : memory : llvmIntrinsics ++ funcs
-          typeDefs   = [ AST.TypeDefinition "Table" (Just tableRefType)
-                       , AST.TypeDefinition "Memory" (Just $ Type.ptr Type.i8)
-                       ]
+          typeDefs   = [tableTypeDef, memoryTypeDef]
 
       pure $ AST.defaultModule { AST.moduleName = "basic"
-                               , AST.moduleDefinitions = globalDefs ++ typeDefs 
+                               , AST.moduleDefinitions = typeDefs ++ globalDefs
                                }
 
 parseModule :: B.ByteString -> Either String S.Module

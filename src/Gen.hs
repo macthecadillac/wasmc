@@ -36,7 +36,7 @@ data OperandStack = OpS { currentBlock :: [AST.Operand]
 data InstrST = InstrST { operandStack :: M.Map Name.Name OperandStack -- stack of operands associated to a block
                        , localIdentifier :: Natural
                        , blockIdentifier :: Natural
-                       , funcIdentifier :: Natural
+                       , funcIdentifier :: Name.Name
                        , blockScopeStack :: [Name.Name]
                        , renameMap :: M.Map Name.Name Name.Name
                        , localConst :: NestedMap Constant.Constant  -- the constants associated with the identifier of the incoming block
@@ -52,7 +52,9 @@ data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
 
 -- a record for per-module constants
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
-                     , functionTypes :: M.Map Natural FunctionType
+                     , functionTypes :: M.Map Name.Name FunctionType
+                     -- the types associated with the type aliases for call_indirect
+                     , functionTypeIndices :: M.Map Natural FunctionType
                      , memoryReference :: AST.Operand
                      , tableReference :: AST.Operand
                     --  , globalVariableTypes :: M.Map Natural Type.Type
