@@ -3,7 +3,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Lib where
 
-import Control.Applicative ((<|>))
+import Control.Applicative
+import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Writer
@@ -23,6 +24,7 @@ import qualified Language.Wasm.Structure as S
 import qualified Language.Wasm.Structure (Function(..), MemArg(..))
 
 import qualified LLVM.AST as AST
+import qualified LLVM.AST.AddrSpace as Addr
 import qualified LLVM.AST.CallingConvention as Conv
 import qualified LLVM.AST.Constant as Constant
 import qualified LLVM.AST.Float as Float
@@ -185,22 +187,56 @@ compileCastOp op t = do
   pure $ fmap I instrs
 
 compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
-compileFunctionCall name arguments returnType = do
-  let nArgs                        = fromIntegral (L.length arguments)
-      function                     = AST.ConstantOperand
-                                   $ flip Constant.GlobalReference name 
-                                   $ Type.FunctionType returnType arguments False
-  -- pop the required number of operands off the `operandStack` and
-  -- collect the results into a list. `replicateM` deals with the
-  -- InstrGen monad.
-  ops       <- replicateM (fromIntegral nArgs) popOperand
-  let (phis, args) = unzip ops
-      arguments    = reverse [(operand, []) | operand <- args]
-      instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
-  constructor <- newInstructionConstructor returnType
-  let instrs = concat phis ++ [constructor instr]
-  tell $ toLog "    call-emit: " instrs
-  pure $ fmap I instrs
+compileFunctionCall name args = aux
+  where
+    -- `<>` is the "summation" operator over the semigroup. It's a
+    -- generalization of `++` for lists and `+`/`*` for numbers
+    aux retType@(Type.StructureType { Type.elementTypes }) = alloc <> singleRet <> pushStack
+      where
+        ptrTy  = Type.PointerType retType $ Addr.AddrSpace 0 -- default addr
+
+        alloc = do
+          constr     <- newInstructionConstructor ptrTy
+          let allocInstr = constr $ AST.Alloca ptrTy Nothing 0 []
+          tell $ toLog "    call-emit: " [allocInstr]
+          pure [I allocInstr]
+
+        singleRet = do
+          callInstrs <- singleReturnCall (args ++ [ptrTy]) Type.VoidType
+          tell $ toLog "          " callInstrs
+          pure callInstrs
+
+        pushStack = do
+          (_, ptr)   <- popOperand  -- no phi since there is no branching since alloc
+          let genInstr (i, t) = do
+                let idx          = AST.ConstantOperand $ Constant.Int 32 i
+                    unamedGetPtr = AST.GetElementPtr False ptr [idx] []
+                    ptrType      = Type.PointerType t $ Addr.AddrSpace 0
+                ptrInstr  <- newInstructionConstructor ptrType <*> pure unamedGetPtr
+                (_, addr) <- popOperand  -- no phi
+                loadInstr <- newInstructionConstructor t <*> (pure $ AST.Load False addr Nothing 0 [])
+                pure [ptrInstr, loadInstr]
+          pushStackInstrs <- foldMap genInstr $ zip [0..] elementTypes
+          tell $ toLog "          " pushStackInstrs
+          pure $ fmap I pushStackInstrs
+
+    aux retType = singleReturnCall args retType
+
+    singleReturnCall arguments returnType = do
+      let nArgs    = fromIntegral (L.length arguments)
+          function = AST.ConstantOperand
+                   $ flip Constant.GlobalReference name 
+                   $ Type.FunctionType returnType arguments False
+      -- pop the required number of operands off the `operandStack` and
+      -- collect the results into a list. `replicateM` deals with the
+      -- InstrGen monad.
+      ops         <- replicateM (fromIntegral nArgs) popOperand
+      let (phis, args) = unzip ops
+          arguments    = reverse [(operand, []) | operand <- args]
+          instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
+      constructor <- newInstructionConstructor returnType
+      let instrs = concat phis ++ [constructor instr]
+      pure $ fmap I instrs
 
 callIntrinsics :: String -> InstrGen [LLVMInstr]
 callIntrinsics name = do
@@ -210,24 +246,25 @@ callIntrinsics name = do
 compileInstr :: S.Instruction Natural -> InstrGen [LLVMInstr]
 compileInstr S.Unreachable          = pure [T $ AST.Do $ AST.Unreachable []]
 compileInstr S.Nop                  = pure []
+compileInstr S.Drop                 = popOperand $> []
 
 compileInstr (S.IUnOp bs S.IClz)    = pushOperand false *> callIntrinsics ("llvm.ctlz.i" ++ sBitSize bs)
 compileInstr (S.IUnOp bs S.ICtz)    = pushOperand false *> callIntrinsics ("llvm.cttz.i" ++ sBitSize bs)
 compileInstr (S.IUnOp bs S.IPopcnt) = callIntrinsics $ "llvm.ctpop.i" ++ sBitSize bs
 
 compileInstr (S.FUnOp bs S.FAbs)     = callIntrinsics $ "llvm.fabs.f" ++ sBitSize bs
-compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) *> compileInstr (S.FBinOp S.BS32 S.FMul)
-compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) *> compileInstr (S.FBinOp S.BS64 S.FMul)
+compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) <> compileInstr (S.FBinOp S.BS32 S.FMul)
+compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) <> compileInstr (S.FBinOp S.BS64 S.FMul)
 compileInstr (S.FUnOp bs S.FCeil)    = callIntrinsics $ "llvm.ceil.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FFloor)   = callIntrinsics $ "llvm.floor.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FTrunc)   = callIntrinsics $ "llvm.trunc.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FNearest) = callIntrinsics $ "llvm.roundeven.f" ++ sBitSize bs
 compileInstr (S.FUnOp bs S.FSqrt)    = callIntrinsics $ "llvm.sqrt.f" ++ sBitSize bs
 
-compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) *> compileInstr (S.IRelOp S.BS32 S.IEq)
-compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) *> compileInstr (S.IRelOp S.BS64 S.IEq)
+compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) <> compileInstr (S.IRelOp S.BS32 S.IEq)
+compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) <> compileInstr (S.IRelOp S.BS64 S.IEq)
 
-compileInstr S.I32WrapI64            = F.fail "not implemented: S.I32WrapI64"
+compileInstr S.I32WrapI64            = throwError "not implemented: S.I32WrapI64"
 compileInstr S.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
 compileInstr S.I64ExtendUI32         = compileCastOp AST.ZExt Type.i64
 compileInstr (S.ITruncFU _ bs)       = compileCastOp AST.SIToFP $ iBitSize bs
@@ -290,48 +327,61 @@ compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegr
 compileInstr (S.F32Const n)        = compileConst $ Constant.Float $ Float.Single n
 compileInstr (S.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
 
-compileInstr (S.SetGlobal n)       = F.fail "not implemented: SetGlobal"
-compileInstr (S.TeeLocal n)        = F.fail "not implemented: TeeLocal"
-compileInstr (S.SetLocal n)        = do
+compileInstr (S.SetGlobal n)       = throwError "not implemented: SetGlobal"
+compileInstr (S.TeeLocal n)        = do
   -- if there is a constant associated to the variable, remove it
   let ident = makeName "local" n
   unassignConstant ident
-  (phi, a) <- popOperand
+  (phi, a) <- peekOperand
   case a of
     (AST.LocalReference _ name) -> addRenameAction name ident
     (AST.ConstantOperand const) -> assignConstant ident const
-    _                           -> F.fail "unsupported operand"
+    _                           -> throwError "unsupported operand"
   tell ["    emit: " ++ show phi]
   pure $ I <$> phi
 
-compileInstr (S.GetGlobal n)       = F.fail "not implemented: GetGlobal"
+compileInstr (S.SetLocal n)        = do
+  instr <- compileInstr (S.TeeLocal n)
+  _     <- compileInstr (S.Drop)  -- drop doesn't return anything
+  pure instr
+
+compileInstr (S.GetGlobal n)       = throwError "not implemented: GetGlobal"
 
 -- `<|>` is the choice operator. It tries the first branch, and if it fails,
 -- goes on to try the second branch.
-compileInstr (S.GetLocal n)        = const <|> ref
+compileInstr (S.GetLocal n)        = inBlockConst <|> outOfBlockConst <|> reference
   where
-    name = makeName "local" n
-    withMsg = maybe (F.fail $ "unbound reference: " ++ show name) pure
-    ref = do
+    inBlockConst    = do
+      constMap  <- gets localConst
+      blockID   <- gets $ makeName "block" . blockIdentifier
+      constants <- withMsg $ M.lookup name constMap
+      c         <- liftMaybe "no constants found." $ M.lookup blockID constants
+      pushOperand (AST.ConstantOperand c)
+      pure []
+
+    outOfBlockConst = do
+      InstrST { localVariableTypes, localConst } <- get
+      blockID     <- gets $ makeName "block" . blockIdentifier
+      varType     <- withMsg $ M.lookup name localVariableTypes
+      constants   <- withMsg $ M.lookup name localConst
+      case M.assocs constants of
+        []       -> throwError "no constants found"
+        [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
+        l        -> do constructor <- newInstructionConstructor varType
+                       let operand = first AST.ConstantOperand . swap <$> l
+                           instrs  = [constructor $ AST.Phi varType operand []]
+                       tell $ toLog "    emit: " instrs
+                       pure $ I <$> instrs
+
+    reference = do
       InstrST { localVariableTypes } <- get
       operand <- withMsg $ AST.LocalReference <$> M.lookup name localVariableTypes <*> pure name
       pushOperand operand
       pure []
-    const = do
-      InstrST { localVariableTypes, localConst, blockIdentifier } <- get
-      varType     <- withMsg $ M.lookup name localVariableTypes
-      constants   <- withMsg $ M.lookup name localConst
-      let outofblockInstr = case M.assocs constants of
-                              []       -> F.fail "no constants found"
-                              [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
-                              l        -> do constructor <- newInstructionConstructor varType
-                                             let operand = first AST.ConstantOperand . swap <$> l
-                                                 instrs  = [constructor $ AST.Phi varType operand []]
-                                             tell $ toLog "    emit: " instrs
-                                             pure $ I <$> instrs
-          inblockInstr c  = pushOperand (AST.ConstantOperand c) $> []
-          blockID         = makeName "block" blockIdentifier
-      maybe outofblockInstr inblockInstr $ M.lookup blockID constants
+
+    name      = makeName "local" n
+    liftMaybe = \msg -> maybe (throwError msg) pure
+    withMsg   = liftMaybe $ "unbound reference: " ++ show name
 
 compileInstr (S.Call i) = do
   ModEnv { functionTypes } <- ask
@@ -361,9 +411,9 @@ compileInstr (S.If _ b1 b2) = do
   incrBlockIdentifier
   pushScope endIf
   thenInstrs      <- branchOperandStack originID b1Ident
-  b1Compiled      <- concat <$> traverse compileInstr (appendTerm b1)
+  b1Compiled      <- foldMap compileInstr $ appendTerm b1
   _               <- moveOperandStack originID b2Ident  -- same instrs as thenInstrs
-  b2Compiled      <- concat <$> traverse compileInstr (appendTerm b2)
+  b2Compiled      <- foldMap compileInstr $ appendTerm b2
   popScope
   let term = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
   tell $ toLog "    if-emit: " $ phiP ++ thenInstrs
@@ -388,7 +438,7 @@ compileInstr (S.BrIf i)     = do
   let origin      = makeName "block" blockIndx
       fallthrough = makeName "block" $ blockIndx + 1
   brInstrs        <- branchOperandStack origin dest
-  _               <- moveOperandStack origin fallthrough  -- same instrs as thenInstrs
+  _               <- moveOperandStack origin fallthrough
   incrBlockIdentifier
   let term = AST.Do $ AST.CondBr operand dest fallthrough []
   tell $ toLog "    brif-emit: " $ phiP ++ brInstrs
@@ -402,7 +452,7 @@ compileInstr (S.Block _ body) = do
       numberOfBlocks = countTerminals wasmInstrs
       endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks
   pushScope endOfBlock
-  compiled <- concat <$> traverse compileInstr wasmInstrs
+  compiled <- foldMap compileInstr wasmInstrs
   popScope
   tell $ ["  end block"]
   pure compiled
@@ -418,7 +468,7 @@ compileInstr (S.Loop _ body) = do
       start          = T $ AST.Do $ AST.Br startOfBlock []
   pushScope endOfBlock
   pushScope startOfBlock
-  compiled <- concat <$> traverse compileInstr wasmInstrs
+  compiled <- foldMap compileInstr wasmInstrs
   popScope
   popScope
   tell $ ["  end loop"]
@@ -456,7 +506,7 @@ compileInstr (S.I64Store32 memArg) = compileMem2Instr S.BS64 boomwi memArg
 -- compileInstr S.GrowMemory = compileMemGrow towi 
 
 
-compileInstr instr = F.fail $ "not implemented: " ++ show instr
+compileInstr instr = throwError $ "not implemented: " ++ show instr
 
 
 compileType :: S.ValueType -> Type.Type
@@ -480,7 +530,7 @@ compileRetTypeList l   = Type.StructureType True $ compileType <$> l
 compileFunction :: Natural -> S.Function -> ModGen Global.Global
 compileFunction indx func = evalInstrGen instrGen initExprST
   where
-    initExprST = InstrST M.empty 0 0 [] M.empty M.empty M.empty
+    initExprST = InstrST M.empty 0 0 indx [] M.empty M.empty M.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     -- split the list of `LLVMObj` into blocks by looking for terminators. The
@@ -508,7 +558,7 @@ compileFunction indx func = evalInstrGen instrGen initExprST
             pure (makeName "local" n, t)
       modify $ \st -> st { localVariableTypes = M.fromAscList localVariables }
       -- compile basic blocks and collect the results
-      instrs              <- fmap concat $ traverse compileInstr $ Language.Wasm.Structure.body func
+      instrs              <- foldMap compileInstr $ Language.Wasm.Structure.body func
       llvmInstrs          <- renameInstrs instrs
       (phis, returnInstr) <- returnOperandStackItems
       let blks = splitAfter isTerm
@@ -562,7 +612,7 @@ compileGlobals index global = undefined
   --   name       = makeName "global" index
   --   isConstant = isConst $ S.globalType global
   --   type'      = compileType' $ S.globalType global
-  --   exp        = fmap concat $ traverse compileInstr $ S.initializer global
+  --   exp        = foldMap compileInstr $ S.initializer global
   --   -- TODO: maybe there's a way around this? The wasm specs says
   --   -- the initializer should be `expr` which could really be
   --   -- anything. Not sure how to implement that into LLVM though.
