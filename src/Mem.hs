@@ -14,14 +14,21 @@ import qualified LLVM.AST.Type as Type
 --true = AST.ConstantOperand $ Const.Int 1 1
 --false = AST.ConstantOperand $ Const.Int 1 0
 
---
+-- https://releases.llvm.org/1.1/docs/LangRef.html#i_malloc
+--   <result> = malloc <type>, uint <NumElements>     ; yields {type*}:result
+--   free <type> <value>                              ; yields {void}
+-- Type.ptr - An abbreviation for PointerType t (AddrSpace 0)
+-- Type.NamedTypeReference "PointerType"
+
+
 llvmMalloc :: M.Map String FunctionType
-llvmMalloc = M.fromList [("llvm.malloc", FT [Type.IntegerType, Type.IntegerType] Type.IntegerType)
+llvmMalloc = M.fromList [("llvm.malloc", FT [Type.elementType Type.void, Type.i32] (Type.ptr Type.void)),
+                                 ("llvm.free", FT [Type.elementType Type.void, Type.ptr Type.void] Type.void)]
 
 -- declarations of LLVM intrinsic functions
-llvmIntrinsics :: [Global.Global]
-llvmIntrinsics = do
-  (llvmIntr, FT { arguments, returnType }) <- M.toList llvmIntrinsicsTypes
+llvmMallocDec :: [Global.Global]
+llvmMallocDec = do
+  (llvmIntr, FT { arguments, returnType }) <- M.toList llvmMalloc
   let parameters = ([Global.Parameter t (Name.mkName "") [] | t <- arguments], False)
       name       = Name.mkName llvmIntr
   pure $ Global.functionDefaults { Global.returnType, Global.name, Global.parameters }

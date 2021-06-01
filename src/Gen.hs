@@ -42,6 +42,10 @@ data InstrST = InstrST { operandStack :: M.Map Name.Name OperandStack -- stack o
 data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
   deriving (Show)
 
+
+-- data MemFunctionType = MFT { arguments :: [Type.Type], returnPtrType :: Type.Type }
+--   deriving (Show)
+
 -- a record for per-module constants
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , functionTypes :: M.Map Natural FunctionType

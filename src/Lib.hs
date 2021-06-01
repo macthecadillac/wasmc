@@ -35,6 +35,7 @@ import qualified LLVM.AST.Type as Type
 import qualified LLVM.AST.Linkage as Linkage
 import qualified LLVM.AST.Visibility as Visibility
 
+import Mem
 import Intrinsics
 import Gen
 import Numeric.Natural
@@ -452,7 +453,7 @@ compileInstr (S.I64Store32 memArg) = compileMem2Instr S.BS64 boomwi memArg
 --LLVM: ??
 --compileInstr S.CurrentMemory = compileMem2Instr S.BS64 boomwi 
 --LLVM: Alloca
-compileInstr S.GrowMemory = compileMemGrow towi 
+-- compileInstr S.GrowMemory = compileMemGrow towi 
 
 
 compileInstr instr = F.fail $ "not implemented: " ++ show instr
@@ -613,7 +614,7 @@ compileTable index table = globVar
     
 compileElement :: Natural -> S.ElemSegment -> [AST.Instruction]
 compileElement index element = do
-  let offset = AST.Alloca Type.i32 (Just 1) 4 []
+  let offset = AST.Alloca Type.i32 (Just (AST.ConstantOperand (Constant.Int 32 1))) 4 []
   [offset]
 
 compileElements :: Natural -> [S.ElemSegment] -> ModGen Global.Global
@@ -625,8 +626,8 @@ compileElements index elements = initTable
                                      , Global.basicBlocks 
                                      }
     name = makeName "tableInit" 0
-    instrs = [AST.Alloca Type.i32 (Just 1) 4 []]
-    basicBlocks = [AST.BasicBlock "tableInit" (assignName instrs) (AST.Do $ (AST.Ret (Just AST.LocalReference Type.VoidType) []))]
+    instrs = [AST.Alloca Type.i32 (Just (AST.ConstantOperand $ Constant.Int 32 1)) 4 []]
+    basicBlocks = [AST.BasicBlock "tableInit" (assignName instrs) (AST.Do $ (AST.Ret Nothing []))]
     assignName instrs = fmap ("12" AST.:=) instrs
     -- basicBlocks = fmap (buildBlock . assignName)
     --         $ zip [0..]
@@ -706,14 +707,14 @@ compileMem2Instr bs builder memArg = do
 
 
 
-compileMemGrow :: GrowMemBuilder -> InstrGen [LLVMInstr]
-compileMemGrow builder = do
-  (phiV, delta)  <- popOperand
-  -- (phiA, addr) <- popOperand
-  -- let algn   = fromIntegral $ S.align memArg
-  --     instrs = phiV ++ phiA ++ [AST.Do $ builder addr val algn]
-  tell $ toLog "    emit: " instrs
-  -- pure $ fmap I instrs
+-- compileMemGrow :: GrowMemBuilder -> InstrGen [LLVMInstr]
+-- compileMemGrow builder = do
+--   (phiV, delta)  <- popOperand
+--   -- (phiA, addr) <- popOperand
+--   -- let algn   = fromIntegral $ S.align memArg
+--   --     instrs = phiV ++ phiA ++ [AST.Do $ builder addr val algn]
+--   tell $ toLog "    emit: " instrs
+--   -- pure $ fmap I instrs
 
 -- TODO: datas
 -- TODO: imports
