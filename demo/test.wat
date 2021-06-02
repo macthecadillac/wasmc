@@ -3,6 +3,8 @@
 
   (memory $mem 1)
 
+  (start $main)
+
   (table 18 funcref)
   (elem (i32.const 0)
     ;; for cells that are currently dead
@@ -315,4 +317,6 @@
     (call $evolveAllCells)
     (call $promoteNextGeneration)
   )
+
+  (func $_main)
 )

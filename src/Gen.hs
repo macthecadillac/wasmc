@@ -61,6 +61,8 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , memoryMinSize :: Natural
                      , memoryMaxSize :: Maybe Natural
                      , tableReference :: AST.Operand
+                     , tableElements :: M.Map Natural Name.Name
+                     , tableRefType :: Type.Type
                     --  , globalVariableTypes :: M.Map Natural Type.Type
                       }
                      deriving (Show)
@@ -248,14 +250,14 @@ incrLocalIdentifier = modify $ \st -> st { localIdentifier = localIdentifier st 
 
 -- create a new identifier, put the identifier on the `operandStack` and
 -- increment the global identifier tracker
-newInstructionConstructor :: Type.Type -> InstrGen (AST.Instruction -> AST.Named AST.Instruction)
-newInstructionConstructor Type.VoidType = pure AST.Do
-newInstructionConstructor idType        = do
+newNamedInstruction :: Type.Type -> AST.Instruction -> InstrGen (AST.Named AST.Instruction)
+newNamedInstruction Type.VoidType instr = pure $ AST.Do instr
+newNamedInstruction idType        instr = do
   name <- gets $ makeName "tmp" . localIdentifier
   let identifier = AST.LocalReference idType name
   pushOperand identifier
   incrLocalIdentifier
-  pure (name AST.:=)
+  pure (name AST.:= instr)
 
 returnOperandStackItems :: InstrGen ([AST.Named AST.Instruction], AST.Named AST.Terminator)
 returnOperandStackItems = do
@@ -277,12 +279,11 @@ returnOperandStackItems = do
             ptrType   = Type.PointerType returnType $ Addr.AddrSpace 0
             ptr       = AST.LocalReference ptrType ptrIdent
             genInstr (i, op, t) = do
-              let idx         = AST.ConstantOperand $ Constant.Int 32 i
-                  getPtrInstr = AST.GetElementPtr False ptr [idx] []
-              constr    <- newInstructionConstructor t
-              (_, addr) <- popOperand  -- no phi
+              let idx     = AST.ConstantOperand $ Constant.Int 32 i
+              getPtrInstr <- newNamedInstruction t $ AST.GetElementPtr False ptr [idx] []
+              (_, addr)   <- popOperand  -- no phi
               let storeInstr = AST.Do $ AST.Store False addr op Nothing 0 []
-              pure [constr getPtrInstr, storeInstr]
+              pure [getPtrInstr, storeInstr]
         instrs <- foldMap genInstr $ zip3 [0..] ops $ AST.elementTypes returnType
         tell $ toLog "    collapse-ops: " instrs
         pure (instrs, Nothing)

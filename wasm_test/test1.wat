@@ -1,4 +1,11 @@
 (module
+  (table 2 funcref)
+  (start $main)
+  (elem (i32.const 0)
+        $f11
+        $f12)
+  (memory 1)
+
   (func $f (param $a i32) (param $b i32) (param $c i32) (param $d i32) (param $e i32) (result i32)
     local.get $a
     local.get $b
@@ -115,4 +122,84 @@
     local.get $d
     f32.ceil
     f32.add)
+
+  (func $f11 (result i32)
+    i32.const 666
+  )
+
+  (type $_0 (func (result i32)))
+  (func $f12 (result i32)
+    i32.const 0
+    call_indirect (type $_0)
+    i32.const 999
+    i32.add
+  )
+
+  (; calling a table function ;)
+  (func $f13 (param $a i32) (result i32)
+    i32.const 0
+    call_indirect (type $_0)
+    local.get $a
+    i32.add
+  )
+
+  (; calling a nested table function ;)
+  (func $f14 (result i32)
+    i32.const 1
+    call_indirect (type $_0)
+  )
+
+  (; if else testing ;)
+  (func $f15 (param $a i64) (result i64)
+    (local $x i64)
+    (local $y i64)
+    (i64.const 0)
+    (local.set $x)
+    (local.get $a)
+    (i64.eqz)
+    (if
+      (then
+        (i64.const 42)
+        (local.set $y))
+      (else
+        (local.get $a)
+        (i64.const 1)
+        (i64.eq)
+        (if
+          (then
+            (i64.const 99)
+            (local.set $y))
+          (else
+            (i64.const 7)
+            (local.set $y)))))
+    (local.get $y))
+
+  (; testing memory storage and retrieval helper ;)
+  (func $f16 (result i32)
+    (i32.const 0)
+    (i32.const 300)
+    (i32.store)
+    (i32.const 47)
+  ) 
+
+  (; testing memory storage and retrieval ;)
+  (func $f17 (result i32)
+    (call $f16)
+    (i32.const 0)
+    (i32.load)
+    (i32.add)
+  ) 
+  (;𝖼𝗅𝗓 | 𝖼𝗍𝗓 | 𝗉𝗈𝗉𝖼𝗇𝗍;)
+  (func $f18 (result i32)
+    (i32.const 6)
+    i32.popcnt
+    (i32.const 16)
+    i32.ctz
+    i32.add
+    (i32.const 32)
+    i32.clz
+    i32.add
+  )
+
+  (func $main)
 )
