@@ -16,12 +16,12 @@ void tick() {
 }
 
 void render() {
-    for (int y = 0; y < 3; y++) {
+    for (int y = 0; y < 50; y++) {
         for (int x = 0; x < 50; x++) {
             if (getCell(x, y) > 0) {
-                mvaddch(y+1,x,"0");
+                mvaddch(y+1,x,'0');
             } else {
-                mvaddch(y+1,x,"_");
+                mvaddch(y+1,x,'_');
             }
         }
     }
@@ -33,8 +33,8 @@ int main() {
   printf("start\n");
   _main();
   printf("mem+tables allocated\n");
-  for (int i = 0; i < 500; i++) {
-    fprintf(stderr, "setting cells\n");
+  for (int i = 0; i < 600; i++) {
+    // fprintf(stderr, "setting cells\n");
     setCell(rand() % 50, rand() % 50, 1);
   }
   fprintf(stderr, "cells are set\n");
