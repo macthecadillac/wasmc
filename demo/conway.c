@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <curses.h>
 #include "test.h"
 
 int getCell(int x, int y) {
@@ -15,16 +16,16 @@ void tick() {
 }
 
 void render() {
-    for (int y = 0; y < 30; y++) {
+    for (int y = 0; y < 3; y++) {
         for (int x = 0; x < 50; x++) {
             if (getCell(x, y) > 0) {
-                printf("0");
+                mvaddch(y+1,x,"0");
             } else {
-                printf("1");
+                mvaddch(y+1,x,"_");
             }
         }
-        printf("\n");
     }
+    refresh();
 }
 
 
@@ -32,15 +33,22 @@ int main() {
   printf("start\n");
   _main();
   printf("mem+tables allocated\n");
-  for (int i = 0; i < 400; i++) {
+  for (int i = 0; i < 500; i++) {
+    fprintf(stderr, "setting cells\n");
     setCell(rand() % 50, rand() % 50, 1);
   }
-  printf("cells are set");
+  fprintf(stderr, "cells are set\n");
+  initscr();
+  cbreak();
+  noecho();
 
-  for (int i=0; i<2; i++) {
-      printf("tick");
-      tick();
+  for (int i=0; i<10; i++) {
+    //   fprintf(stderr, "ticky\n");
+      mvaddstr(0,0,"------------------------gen------------------------\n");
       render();
-      sleep(2);
+      tick();
+    //   fprintf(stderr, "tocky\n");
+      sleep(1);
   }
+  endwin();
 }
