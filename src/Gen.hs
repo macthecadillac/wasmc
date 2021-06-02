@@ -14,6 +14,7 @@ import qualified Data.Map as M
 import Data.Maybe
 import qualified Data.List as L
 import Data.Tuple
+import Data.Word
 import Debug.Trace
 import Numeric.Natural
 
@@ -55,7 +56,10 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , functionTypes :: M.Map Name.Name FunctionType
                      -- the types associated with the type aliases for call_indirect
                      , functionTypeIndices :: M.Map Natural FunctionType
+                     , nativeWordWidth :: Word32
                      , memoryReference :: AST.Operand
+                     , memoryMinSize :: Natural
+                     , memoryMaxSize :: Maybe Natural
                      , tableReference :: AST.Operand
                     --  , globalVariableTypes :: M.Map Natural Type.Type
                       }

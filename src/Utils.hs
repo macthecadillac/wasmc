@@ -1,5 +1,7 @@
+{-# LANGUAGE FlexibleContexts #-}
 module Utils where
 
+import Control.Monad.Except
 import Data.Bifunctor
 import Data.Binary (encode)
 import Data.ByteString.Lazy (append, toStrict, ByteString)
@@ -7,12 +9,14 @@ import Data.ByteString.Lazy.Char8 (pack)
 import Data.ByteString.Short.Internal (ShortByteString, toShort)
 import qualified Data.List as L
 import Data.Tuple (swap)
+import Numeric.Natural
+import System.Info (arch)
+
 import LLVM.AST
 import LLVM.AST.Constant
 import LLVM.AST.Float
 import LLVM.AST.Name
 import LLVM.AST.Type
-import Numeric.Natural
 
 appendIfLast :: (Show a) => (a -> Bool) -> a -> [a] -> [a]
 appendIfLast f a = reverse . aux . reverse
@@ -46,3 +50,11 @@ operandType t = error $ "Not a recognized type: " ++ show t
 toLog :: (Show a) => String -> [a] -> [String]
 toLog header []     = []
 toLog header (x:xs) = (header ++ show x) : ((replicate (length header) ' ' ++) . show <$> xs)
+
+machineNativeWordWidth :: (Integral a, MonadError String m) => m a
+machineNativeWordWidth = case arch of
+                           "i386"   -> pure 32
+                           "x86_64" -> pure 64
+                           "arm"    -> pure 32
+                           "ia64"   -> pure 64
+                           _        -> throwError "not a supported architecture"

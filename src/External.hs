@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NamedFieldPuns #-}
-module Intrinsics where
+module External where
 
 import qualified Data.Map as M
 import Gen
@@ -41,10 +41,20 @@ llvmIntrinsicsTypes = M.fromList [("llvm.fabs.f32", FT [Type.float] Type.float)
                                  ,("llvm.copysign.f64", FT [Type.double, Type.double] Type.double)
                                  ]
 
--- declarations of LLVM intrinsic functions
-llvmIntrinsics :: [Global.Global]
-llvmIntrinsics = do
-  (llvmIntr, FT { arguments, returnType }) <- M.toList llvmIntrinsicsTypes
+-- void *malloc(size_t size)
+--   <result> = malloc <type>, uint <NumElements>     ; yields {type*}:result
+--   free <type> <value>                              ; yields {void}
+libcFunctionTypes :: M.Map String FunctionType
+libcFunctionTypes = M.fromList [("malloc", FT [Type.i64] (Type.ptr Type.i8)),
+                                ("free", FT [Type.ptr Type.i8] Type.void)]
+
+externalFunctionTypes :: M.Map String FunctionType
+externalFunctionTypes = M.union llvmIntrinsicsTypes libcFunctionTypes
+
+-- declarations of external functions
+externalFunctions :: [Global.Global]
+externalFunctions = do
+  (llvmIntr, FT { arguments, returnType }) <- M.toList externalFunctionTypes
   let parameters = ([Global.Parameter t (Name.mkName "") [] | t <- arguments], False)
       name       = Name.mkName llvmIntr
   pure $ Global.functionDefaults { Global.returnType, Global.name, Global.parameters }
