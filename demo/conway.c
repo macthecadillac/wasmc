@@ -1,3 +1,4 @@
+#include <errno.h>   
 #include <stdio.h>
 #include <stdlib.h>
 #include <curses.h>
@@ -29,11 +30,31 @@ void render() {
 }
 
 
-int main() {
+int main(int argc, char *argv[]) {
+  char *p;
+  int seed = 500;
+  int gens = 10;
+  
+  errno = 0;
+
+  if (argc == 2) {
+    long conv = strtol(argv[1], &p, 10);
+    seed = conv;
+    gens = 10;
+  } else if (argc == 3) {
+    long conv = strtol(argv[1], &p, 10);
+    seed = conv;
+    conv = strtol(argv[2], &p, 10);
+    gens = conv;
+  } else {
+    seed = 500;
+    gens = 10;
+  }
+
   printf("start\n");
   _main();
   printf("mem+tables allocated\n");
-  for (int i = 0; i < 600; i++) {
+  for (int i = 0; i < seed; i++) {
     // fprintf(stderr, "setting cells\n");
     setCell(rand() % 50, rand() % 50, 1);
   }
@@ -42,7 +63,7 @@ int main() {
   cbreak();
   noecho();
 
-  for (int i=0; i<10; i++) {
+  for (int i=0; i<gens; i++) {
     //   fprintf(stderr, "ticky\n");
       mvaddstr(0,0,"------------------------gen------------------------\n");
       render();
