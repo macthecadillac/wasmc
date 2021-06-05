@@ -29,8 +29,6 @@ llvmIntrinsicsTypes = M.fromList [("llvm.fabs.f32", FT [Type.float] Type.float)
                                  ,("llvm.floor.f64", FT [Type.double] Type.double)
                                  ,("llvm.trunc.f32", FT [Type.float] Type.float)
                                  ,("llvm.trunc.f64", FT [Type.double] Type.double)
-                                 ,("llvm.roundeven.f32", FT [Type.float] Type.float)
-                                 ,("llvm.roundeven.f64", FT [Type.double] Type.double)
                                  ,("llvm.sqrt.f32", FT [Type.float] Type.float)
                                  ,("llvm.sqrt.f64", FT [Type.double] Type.double)
                                  ,("llvm.minnum.f32", FT [Type.float, Type.float] Type.float)
@@ -45,8 +43,12 @@ llvmIntrinsicsTypes = M.fromList [("llvm.fabs.f32", FT [Type.float] Type.float)
 --   <result> = malloc <type>, uint <NumElements>     ; yields {type*}:result
 --   free <type> <value>                              ; yields {void}
 libcFunctionTypes :: M.Map String FunctionType
-libcFunctionTypes = M.fromList [("malloc", FT [Type.i64] (Type.ptr Type.i8)),
-                                ("free", FT [Type.ptr Type.i8] Type.void)]
+libcFunctionTypes = M.fromList [("malloc", FT [Type.i64] (Type.ptr Type.i8))
+                               ,("free", FT [Type.ptr Type.i8] Type.void)
+                               ,("roundeven", FT [Type.float] Type.float)
+                               ,("roundevenf", FT [Type.double] Type.double)
+                               ,("printf", FT [Type.ptr Type.i8] Type.i32)
+                               ]
 
 externalFunctionTypes :: M.Map String FunctionType
 externalFunctionTypes = M.union llvmIntrinsicsTypes libcFunctionTypes

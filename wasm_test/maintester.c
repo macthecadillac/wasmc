@@ -157,6 +157,14 @@ int control_flow_tests() {
         printf("FAIL: EQ Not Working; Func Call Returned Unexpected Value: %ld\n", res);
     }
 
+    res = func19(10);
+    if (res == 55)
+        printf("PASS: Loop Working\n");
+    else {
+        failed++;
+        printf("FAIL: Loop Not Working; Func Call Returned Unexpected Value: %ld\n", res);
+    }
+
     return failed;
 }
 
@@ -231,7 +239,7 @@ int main()
     printf("Calling _main\n");
     _main();
     printf("After Main\n");
-    int failed = 0, numTests = 15;
+    int failed = 0, numTests = 16;
     int num1 = 5, num2 = 10;
 
     /*int res = func0(num1, num2);

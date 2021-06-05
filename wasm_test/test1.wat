@@ -201,5 +201,33 @@
     i32.add
   )
 
+  (func $f19 (param $n i64) (result i64)
+    (local $i i64)
+    (local $s i64)
+    (i64.const 0)
+    (local.set $i)
+    (i64.const 0)
+    (local.set $s)
+    (block
+      (local.get $i)
+      (local.get $n)
+      (i64.ge_s)
+      (br_if 0)
+      (loop
+        (local.get $i)
+        (i64.const 1)
+        (i64.add)
+        (local.set $i)
+        (local.get $s)
+        (local.get $i)
+        (i64.add)
+        (local.set $s)
+        (local.get $n)
+        (local.get $i)
+        (i64.eq)
+        (br_if 1)
+        (br 0)))
+    (local.get $s))
+
   (func $main)
 )

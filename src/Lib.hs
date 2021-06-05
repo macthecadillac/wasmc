@@ -13,6 +13,7 @@ import Data.Bifunctor
 import qualified Data.ByteString.Lazy as B
 import Data.Functor
 import qualified Data.Map as M
+import qualified Data.Set as S
 import qualified Data.List as L
 import Data.Maybe
 import Data.Word
@@ -22,7 +23,7 @@ import Numeric.Natural
 import System.Info (arch)
 
 import qualified Language.Wasm as Wasm
-import qualified Language.Wasm.Structure as S
+import qualified Language.Wasm.Structure as Struct
 import qualified Language.Wasm.Structure (Function(..))
 
 import qualified LLVM.AST as AST
@@ -79,48 +80,50 @@ ooi op a b = op a b []
 pooi :: CmpBuilder p
 pooi p pred a b = p pred a b []
 
-data LLVMInstr = I (AST.Named AST.Instruction)
-               | T (AST.Named AST.Terminator)
-               deriving (Show)
-
 isTerm :: LLVMInstr -> Bool
 isTerm (T _) = True
 isTerm _     = False
 
-sBitSize :: S.BitSize -> String
-sBitSize S.BS32 = "32"
-sBitSize S.BS64 = "64"
+sBitSize :: Struct.BitSize -> String
+sBitSize Struct.BS32 = "32"
+sBitSize Struct.BS64 = "64"
 
-nBitSize :: S.BitSize -> Word32
-nBitSize S.BS32 = 32
-nBitSize S.BS64 = 64
+nBitSize :: Struct.BitSize -> Word32
+nBitSize Struct.BS32 = 32
+nBitSize Struct.BS64 = 64
 
-iBitSize :: S.BitSize -> Type.Type
-iBitSize S.BS32 = Type.i32
-iBitSize S.BS64 = Type.i64
+iBitSize :: Struct.BitSize -> Type.Type
+iBitSize Struct.BS32 = Type.i32
+iBitSize Struct.BS64 = Type.i64
 
-fBitSize :: S.BitSize -> Type.Type
-fBitSize S.BS32 = Type.float
-fBitSize S.BS64 = Type.double
+fBitSize :: Struct.BitSize -> Type.Type
+fBitSize Struct.BS32 = Type.float
+fBitSize Struct.BS64 = Type.double
 
 -- check if a wasm instruction will be compiled to a terminator in LLVM
-wasmIsTerm :: S.Instruction a -> Bool
-wasmIsTerm S.Unreachable = True
-wasmIsTerm S.Return      = True
-wasmIsTerm S.If {}       = True
-wasmIsTerm (S.Br _)      = True
-wasmIsTerm (S.BrIf _)    = True
-wasmIsTerm (S.Block _ _) = True
-wasmIsTerm (S.Loop _ _)  = True
+wasmIsTerm :: Struct.Instruction a -> Bool
+wasmIsTerm Struct.Unreachable = True
+wasmIsTerm Struct.Return      = True
+wasmIsTerm Struct.If {}       = True
+wasmIsTerm (Struct.Br _)      = True
+wasmIsTerm (Struct.BrIf _)    = True
+wasmIsTerm (Struct.Block _ _) = True
+wasmIsTerm (Struct.Loop _ _)  = True
 wasmIsTerm _             = False
 
-countTerminals :: [S.Instruction Natural] -> Natural
+countTerminals :: [Struct.Instruction Natural] -> Natural
 countTerminals = sum . fmap aux
   where
-    aux (S.If _ b1 b2) = oneIfTailIsNotTerm b1 + oneIfTailIsNotTerm b2 + countTerminals b1 + countTerminals b2
-    aux (S.Block _ l)  = oneIfTailIsNotTerm l + countTerminals l
-    aux (S.Br _)       = 1
-    aux (S.BrIf _)     = 1
+    aux (Struct.If _ [] []) = 2
+    aux (Struct.If _ [] b2) = 1 + oneIfTailIsNotTerm b2 + countTerminals b2
+    aux (Struct.If _ b1 []) = 1 + oneIfTailIsNotTerm b1 + countTerminals b1
+    aux (Struct.If _ b1 b2) = oneIfTailIsNotTerm b1 + oneIfTailIsNotTerm b2 + countTerminals b1 + countTerminals b2
+    aux (Struct.Block _ []) = 1
+    aux (Struct.Block _ l)  = oneIfTailIsNotTerm l + countTerminals l
+    aux (Struct.Br _)       = 1
+    aux (Struct.BrIf _)     = 1
+    aux (Struct.Loop _ [])  = 1
+    aux (Struct.Loop _ l)   = 1 + oneIfTailIsNotTerm l + countTerminals l
     aux _              = 0
 
     oneIfTailIsNotTerm = oneIfHead (not . wasmIsTerm) . reverse
@@ -142,17 +145,17 @@ compileBinOp builder op t = do
   -- generate a new identifier for the intermediate result. In LLVM IR
   -- this amounts to saving the results to a 'variable.'
   binOpInstr <- newNamedInstruction t $ builder op a b
-  let instrs = phiB ++ phiA ++ [binOpInstr]
+  let instrs = phiB ++ phiA ++ [I binOpInstr]
   tell $ toLog "    emit: " instrs
-  pure $ fmap I instrs
+  pure instrs
 
 compileUnOp :: UnOpBuilder a -> a -> Type.Type -> InstrGen [LLVMInstr]
 compileUnOp builder op t = do
   (phi, a)  <- popOperand
   unOpInstr <- newNamedInstruction t $ builder op a
-  let instrs = phi ++ [unOpInstr]
+  let instrs = phi ++ [I unOpInstr]
   tell $ toLog "    emit: " instrs
-  pure $ fmap I instrs
+  pure instrs
 
 compileCmpOp :: POOI p -> p -> InstrGen [LLVMInstr]
 compileCmpOp cmp pred = do
@@ -164,20 +167,20 @@ compileCmpOp cmp pred = do
   -- course preferable to directly go to i1 but for simplicity and for type
   -- sanity we cast back to i32 before moving forward
   bitcast    <- castIntIfNotBitsize 32
-  let instrs = phiB ++ phiA ++ [cmpOpInstr] ++ bitcast
+  let instrs = phiB ++ phiA ++ [I cmpOpInstr] ++ bitcast
   tell $ toLog "    emit: " instrs
-  pure $ fmap I instrs
+  pure instrs
   
 compileCastOp :: OTI -> Type.Type -> InstrGen [LLVMInstr]
 compileCastOp op t = do
   (phi, a)    <- popOperand
   castOpInstr <- newNamedInstruction t $ op a t []
-  let instrs = phi ++ [castOpInstr]
+  let instrs = phi ++ [I castOpInstr]
   tell $ toLog "    emit: " instrs
-  pure $ fmap I instrs
+  pure instrs
 
-compileFunctionCall :: Name.Name -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
-compileFunctionCall name args = aux
+compileFunctionCall :: AST.Operand -> [Type.Type] -> Type.Type -> InstrGen [LLVMInstr]
+compileFunctionCall function args = aux
   where
     -- `<>` is the "summation" operator over the semigroup. It's a
     -- generalization of `++` for lists and `+`/`*` for numbers
@@ -213,9 +216,6 @@ compileFunctionCall name args = aux
 
     singleReturnCall arguments returnType = do
       let nArgs    = fromIntegral (L.length arguments)
-          function = AST.ConstantOperand
-                   $ flip Constant.GlobalReference name 
-                   $ Type.FunctionType returnType arguments False
       -- pop the required number of operands off the `operandStack` and
       -- collect the results into a list. `replicateM` deals with the
       -- InstrGen monad.
@@ -224,237 +224,237 @@ compileFunctionCall name args = aux
           arguments    = reverse [(operand, []) | operand <- args]
           instr        = AST.Call Nothing Conv.C [] (Right function) arguments [] []
       namedInstr <- newNamedInstruction returnType instr
-      let instrs = concat phis ++ [namedInstr]
-      pure $ fmap I instrs
+      pure $ concat phis ++ [I namedInstr]
 
 callExternal :: String -> InstrGen [LLVMInstr]
 callExternal name = do
   let FT { arguments, returnType } = externalFunctionTypes M.! name
-  compileFunctionCall (Name.mkName name) arguments returnType
+      name'    = Name.mkName name
+      function = AST.ConstantOperand
+               $ flip Constant.GlobalReference name'
+               $ Type.FunctionType returnType arguments False
+  modify $ \st -> st { externalFuncs = S.insert name' $ externalFuncs st }
+  compileFunctionCall function arguments returnType
 
+intToPtr :: Type.Type -> InstrGen [LLVMInstr]
+intToPtr ptrType = do
+  (phi, ptr) <- popOperand
+  instr      <- newNamedInstruction ptrType $ AST.IntToPtr ptr ptrType []
+  pure $ phi ++ [I instr]
+
+ptrToInt :: Type.Type -> InstrGen [LLVMInstr]
+ptrToInt intType = do
+  (phi, ptr) <- popOperand
+  instr      <- newNamedInstruction intType $ AST.PtrToInt ptr intType []
+  pure $ phi ++ [I instr]
+
+getEltPtr :: Type.Type -> [AST.Operand] -> InstrGen [LLVMInstr]
+getEltPtr ptrType indices = do
+  (phi, ptr) <- popOperand
+  instr      <- newNamedInstruction ptrType $ AST.GetElementPtr True ptr indices []
+  pure $ phi ++ [I instr]
+
+castBit :: Type.Type -> InstrGen [LLVMInstr]
+castBit ptrType = do
+  (phi, ptr) <- popOperand  -- no phi
+  castPtr    <- newNamedInstruction ptrType $ AST.BitCast ptr ptrType []
+  pure $ phi ++ [I castPtr]
+
+load :: Type.Type -> InstrGen [LLVMInstr]
+load valType = do
+  (phi, ptr) <- popOperand
+  loadInstr  <- newNamedInstruction valType $ AST.Load False ptr Nothing 0 []
+  pure $ phi ++ [I loadInstr]
+
+store :: AST.Operand -> InstrGen [LLVMInstr]
+store val = do
+  (phi, ptr) <- popOperand
+  let instr = I $ AST.Do $ AST.Store False ptr val Nothing 0 []
+  pure $ phi ++ [instr]
+
+-- load from linear memory
 compileLoadOp :: Type.Type -> InstrGen [LLVMInstr]
 compileLoadOp valType = do
   (phi, addr) <- popOperand
-  let ptrType  = Type.ptr valType
+  let ptrType    = Type.ptr valType
+      memPtrType = Type.ptr Type.i8
   memIntRef   <- asks memoryReference
-  let memPtrType = Type.ptr Type.i8
   isize       <- isizeM
-  loadMemPtr  <- newNamedInstruction isize $ AST.Load False memIntRef Nothing 0 []
-  (_, memInt) <- popOperand
-  castMemPtr  <- newNamedInstruction memPtrType $ AST.IntToPtr memInt memPtrType []
-  (_, memRef) <- popOperand
-  getEltPtr   <- newNamedInstruction memPtrType $ AST.GetElementPtr True memRef [addr] []
-  (_, eltPtr) <- popOperand  -- no phi
-  castEltPtr  <- newNamedInstruction ptrType $ AST.BitCast eltPtr ptrType []
-  (_, ptr)    <- popOperand
-  loadInstr   <- newNamedInstruction valType $ AST.Load False ptr Nothing 0 []
-  let instrs = phi ++ [loadMemPtr, castMemPtr, getEltPtr, castEltPtr, loadInstr]
-  tell $ toLog "    emit: " instrs
-  pure $ fmap I instrs
+  pushOperand memIntRef
+  instrs <- load isize
+         <> intToPtr memPtrType
+         <> getEltPtr memPtrType [addr]
+         <> castBit ptrType
+         <> load valType
+  tell $ toLog "    emit: " $ phi ++ instrs
+  pure $ phi ++ instrs
 
+-- store to linear memory
 compileStoreOp :: Type.Type -> InstrGen [LLVMInstr]
 compileStoreOp valType = do
   (phiV, val)  <- popOperand
   (phiA, addr) <- popOperand
-  let ptrType  = Type.ptr valType
-  memIntRef    <- asks memoryReference
-  let memPtrType = Type.ptr Type.i8
+  let ptrType    = Type.ptr valType
+      memPtrType = Type.ptr Type.i8
   isize        <- isizeM
-  loadMemPtr   <- newNamedInstruction isize $ AST.Load False memIntRef Nothing 0 []
-  (_, memInt)  <- popOperand
-  castMemPtr   <- newNamedInstruction memPtrType $ AST.IntToPtr memInt memPtrType []
-  (_, memRef)  <- popOperand
-  getEltPtr    <- newNamedInstruction memPtrType $ AST.GetElementPtr True memRef [addr] []
-  (_, eltPtr)  <- popOperand  -- no phi
-  castEltPtr   <- newNamedInstruction ptrType $ AST.BitCast eltPtr ptrType []
-  (_, ptr)     <- popOperand
-  let storeInstr = AST.Do $ AST.Store False ptr val Nothing 0 []
-      instrs     = phiV ++ phiA ++ [loadMemPtr, castMemPtr, getEltPtr, castEltPtr, storeInstr]
-  tell $ toLog "    emit: " instrs
-  pure $ fmap I instrs
+  memIntRef    <- asks memoryReference
+  pushOperand memIntRef
+  instrs <- load isize
+         <> intToPtr memPtrType
+         <> getEltPtr memPtrType [addr]
+         <> castBit ptrType
+         <> store val
+  tell $ toLog "    emit: " $ phiV ++ phiA ++ instrs
+  pure $ phiV ++ phiA ++ instrs
 
-compileInstr :: S.Instruction Natural -> InstrGen [LLVMInstr]
-compileInstr S.Unreachable          = pure [T $ AST.Do $ AST.Unreachable []]
-compileInstr S.Nop                  = pure []
-compileInstr S.Drop                 = popOperand $> []
+compileInstr :: Struct.Instruction Natural -> InstrGen [LLVMInstr]
+compileInstr Struct.Unreachable          = pure [T $ AST.Do $ AST.Unreachable []]
+compileInstr Struct.Nop                  = pure []
+compileInstr Struct.Drop                 = popOperand $> []
 
-compileInstr (S.IUnOp bs S.IClz)    = pushOperand false *> callExternal ("llvm.ctlz.i" ++ sBitSize bs)
-compileInstr (S.IUnOp bs S.ICtz)    = pushOperand false *> callExternal ("llvm.cttz.i" ++ sBitSize bs)
-compileInstr (S.IUnOp bs S.IPopcnt) = callExternal $ "llvm.ctpop.i" ++ sBitSize bs
+compileInstr (Struct.IUnOp bs Struct.IClz)    = pushOperand false *> callExternal ("llvm.ctlz.i" ++ sBitSize bs)
+compileInstr (Struct.IUnOp bs Struct.ICtz)    = pushOperand false *> callExternal ("llvm.cttz.i" ++ sBitSize bs)
+compileInstr (Struct.IUnOp bs Struct.IPopcnt) = callExternal $ "llvm.ctpop.i" ++ sBitSize bs
 
-compileInstr (S.FUnOp bs S.FAbs)     = callExternal $ "llvm.fabs.f" ++ sBitSize bs
-compileInstr (S.FUnOp S.BS32 S.FNeg) = compileInstr (S.F32Const (-1)) <> compileInstr (S.FBinOp S.BS32 S.FMul)
-compileInstr (S.FUnOp S.BS64 S.FNeg) = compileInstr (S.F64Const (-1)) <> compileInstr (S.FBinOp S.BS64 S.FMul)
-compileInstr (S.FUnOp bs S.FCeil)    = callExternal $ "llvm.ceil.f" ++ sBitSize bs
-compileInstr (S.FUnOp bs S.FFloor)   = callExternal $ "llvm.floor.f" ++ sBitSize bs
-compileInstr (S.FUnOp bs S.FTrunc)   = callExternal $ "llvm.trunc.f" ++ sBitSize bs
-compileInstr (S.FUnOp bs S.FNearest) = callExternal $ "llvm.roundeven.f" ++ sBitSize bs
-compileInstr (S.FUnOp bs S.FSqrt)    = callExternal $ "llvm.sqrt.f" ++ sBitSize bs
+compileInstr (Struct.FUnOp bs Struct.FAbs)              = callExternal $ "llvm.fabs.f" ++ sBitSize bs
+compileInstr (Struct.FUnOp Struct.BS32 Struct.FNeg)     = foldMap compileInstr [Struct.F32Const (-1), Struct.FBinOp Struct.BS32 Struct.FMul]
+compileInstr (Struct.FUnOp Struct.BS64 Struct.FNeg)     = foldMap compileInstr [Struct.F64Const (-1), Struct.FBinOp Struct.BS64 Struct.FMul]
+compileInstr (Struct.FUnOp bs Struct.FCeil)             = callExternal $ "llvm.ceil.f" ++ sBitSize bs
+compileInstr (Struct.FUnOp bs Struct.FFloor)            = callExternal $ "llvm.floor.f" ++ sBitSize bs
+compileInstr (Struct.FUnOp bs Struct.FTrunc)            = callExternal $ "llvm.trunc.f" ++ sBitSize bs
+compileInstr (Struct.FUnOp Struct.BS32 Struct.FNearest) = callExternal "roundevenf"
+compileInstr (Struct.FUnOp Struct.BS64 Struct.FNearest) = callExternal "roundeven"
+compileInstr (Struct.FUnOp bs Struct.FSqrt)             = callExternal $ "llvm.sqrt.f" ++ sBitSize bs
 
-compileInstr S.I32Eqz                = compileInstr (S.I32Const 0) <> compileInstr (S.IRelOp S.BS32 S.IEq)
-compileInstr S.I64Eqz                = compileInstr (S.I64Const 0) <> compileInstr (S.IRelOp S.BS64 S.IEq)
+compileInstr Struct.I32Eqz                = foldMap compileInstr [Struct.I32Const 0, Struct.IRelOp Struct.BS32 Struct.IEq]
+compileInstr Struct.I64Eqz                = foldMap compileInstr [Struct.I64Const 0, Struct.IRelOp Struct.BS64 Struct.IEq]
 
 -- not sure how to wrap integers in LLVM
--- compileInstr S.I32WrapI64            = throwError "not implemented: S.I32WrapI64"
-compileInstr S.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
-compileInstr S.I64ExtendUI32         = compileCastOp AST.ZExt Type.i64
-compileInstr (S.ITruncFU _ bs)       = compileCastOp AST.SIToFP $ iBitSize bs
-compileInstr (S.ITruncFS _ bs)       = compileCastOp AST.UIToFP $ iBitSize bs
-compileInstr (S.FConvertIU _ bs)     = compileCastOp AST.FPToUI $ iBitSize bs
-compileInstr (S.FConvertIS _ bs)     = compileCastOp AST.FPToSI $ iBitSize bs
-compileInstr S.F32DemoteF64          = compileCastOp AST.FPTrunc Type.float
-compileInstr S.F64PromoteF32         = compileCastOp AST.FPExt Type.double
-compileInstr (S.IReinterpretF bs)    = compileCastOp AST.BitCast $ iBitSize bs
-compileInstr (S.FReinterpretI bs)    = compileCastOp AST.BitCast $ iBitSize bs
+-- compileInstr Struct.I32WrapI64            = throwError "not implemented: Struct.I32WrapI64"
+compileInstr Struct.I64ExtendSI32         = compileCastOp AST.SExt Type.i64
+compileInstr Struct.I64ExtendUI32         = compileCastOp AST.ZExt Type.i64
+compileInstr (Struct.ITruncFU _ bs)       = compileCastOp AST.SIToFP $ iBitSize bs
+compileInstr (Struct.ITruncFS _ bs)       = compileCastOp AST.UIToFP $ iBitSize bs
+compileInstr (Struct.FConvertIU _ bs)     = compileCastOp AST.FPToUI $ iBitSize bs
+compileInstr (Struct.FConvertIS _ bs)     = compileCastOp AST.FPToSI $ iBitSize bs
+compileInstr Struct.F32DemoteF64          = compileCastOp AST.FPTrunc Type.float
+compileInstr Struct.F64PromoteF32         = compileCastOp AST.FPExt Type.double
+compileInstr (Struct.IReinterpretF bs)    = compileCastOp AST.BitCast $ iBitSize bs
+compileInstr (Struct.FReinterpretI bs)    = compileCastOp AST.BitCast $ iBitSize bs
 
-compileInstr (S.IBinOp bs S.IAdd)  = compileBinOp bbooi AST.Add  $ iBitSize bs
-compileInstr (S.IBinOp bs S.ISub)  = compileBinOp bbooi AST.Sub  $ iBitSize bs
-compileInstr (S.IBinOp bs S.IMul)  = compileBinOp bbooi AST.Mul  $ iBitSize bs
-compileInstr (S.IBinOp bs S.IDivS) = compileBinOp booi  AST.SDiv $ iBitSize bs
-compileInstr (S.IBinOp bs S.IDivU) = compileBinOp booi  AST.UDiv $ iBitSize bs
-compileInstr (S.IBinOp bs S.IRemS) = compileBinOp ooi   AST.SRem $ iBitSize bs
-compileInstr (S.IBinOp bs S.IAnd)  = compileBinOp ooi   AST.And  $ iBitSize bs
-compileInstr (S.IBinOp bs S.IOr)   = compileBinOp ooi   AST.Or   $ iBitSize bs
-compileInstr (S.IBinOp bs S.IXor)  = compileBinOp ooi   AST.Xor  $ iBitSize bs
-compileInstr (S.IBinOp bs S.IShl)  = compileBinOp bbooi AST.Shl  $ iBitSize bs
-compileInstr (S.IBinOp bs S.IShrU) = compileBinOp booi  AST.LShr $ iBitSize bs
-compileInstr (S.IBinOp bs S.IShrS) = compileBinOp booi  AST.AShr $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IAdd)  = compileBinOp bbooi AST.Add  $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.ISub)  = compileBinOp bbooi AST.Sub  $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IMul)  = compileBinOp bbooi AST.Mul  $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IDivS) = compileBinOp booi  AST.SDiv $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IDivU) = compileBinOp booi  AST.UDiv $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IRemS) = compileBinOp ooi   AST.SRem $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IAnd)  = compileBinOp ooi   AST.And  $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IOr)   = compileBinOp ooi   AST.Or   $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IXor)  = compileBinOp ooi   AST.Xor  $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IShl)  = compileBinOp bbooi AST.Shl  $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IShrU) = compileBinOp booi  AST.LShr $ iBitSize bs
+compileInstr (Struct.IBinOp bs Struct.IShrS) = compileBinOp booi  AST.AShr $ iBitSize bs
 
-compileInstr (S.IRelOp _  S.IEq)   = compileCmpOp AST.ICmp IPred.EQ
-compileInstr (S.IRelOp _  S.INe)   = compileCmpOp AST.ICmp IPred.NE
-compileInstr (S.IRelOp _  S.ILtU)  = compileCmpOp AST.ICmp IPred.ULT
-compileInstr (S.IRelOp _  S.ILtS)  = compileCmpOp AST.ICmp IPred.SLT
-compileInstr (S.IRelOp _  S.IGtU)  = compileCmpOp AST.ICmp IPred.UGT
-compileInstr (S.IRelOp _  S.IGtS)  = compileCmpOp AST.ICmp IPred.SGT
-compileInstr (S.IRelOp _  S.ILeU)  = compileCmpOp AST.ICmp IPred.ULE
-compileInstr (S.IRelOp _  S.ILeS)  = compileCmpOp AST.ICmp IPred.SLE
-compileInstr (S.IRelOp _  S.IGeU)  = compileCmpOp AST.ICmp IPred.UGE
-compileInstr (S.IRelOp _  S.IGeS)  = compileCmpOp AST.ICmp IPred.SGE
+compileInstr (Struct.IRelOp _  Struct.IEq)   = compileCmpOp AST.ICmp IPred.EQ
+compileInstr (Struct.IRelOp _  Struct.INe)   = compileCmpOp AST.ICmp IPred.NE
+compileInstr (Struct.IRelOp _  Struct.ILtU)  = compileCmpOp AST.ICmp IPred.ULT
+compileInstr (Struct.IRelOp _  Struct.ILtS)  = compileCmpOp AST.ICmp IPred.SLT
+compileInstr (Struct.IRelOp _  Struct.IGtU)  = compileCmpOp AST.ICmp IPred.UGT
+compileInstr (Struct.IRelOp _  Struct.IGtS)  = compileCmpOp AST.ICmp IPred.SGT
+compileInstr (Struct.IRelOp _  Struct.ILeU)  = compileCmpOp AST.ICmp IPred.ULE
+compileInstr (Struct.IRelOp _  Struct.ILeS)  = compileCmpOp AST.ICmp IPred.SLE
+compileInstr (Struct.IRelOp _  Struct.IGeU)  = compileCmpOp AST.ICmp IPred.UGE
+compileInstr (Struct.IRelOp _  Struct.IGeS)  = compileCmpOp AST.ICmp IPred.SGE
 
-compileInstr (S.FBinOp bs S.FAdd)  = compileBinOp fooi AST.FAdd $ fBitSize bs
-compileInstr (S.FBinOp bs S.FSub)  = compileBinOp fooi AST.FSub $ fBitSize bs
-compileInstr (S.FBinOp bs S.FMul)  = compileBinOp fooi AST.FMul $ fBitSize bs
-compileInstr (S.FBinOp bs S.FDiv)  = compileBinOp fooi AST.FDiv $ fBitSize bs
-compileInstr (S.FBinOp bs S.FMin)  = callExternal $ "llvm.minnum.f" ++ sBitSize bs
-compileInstr (S.FBinOp bs S.FMax)  = callExternal $ "llvm.maxnum.f" ++ sBitSize bs
+compileInstr (Struct.FBinOp bs Struct.FAdd)  = compileBinOp fooi AST.FAdd $ fBitSize bs
+compileInstr (Struct.FBinOp bs Struct.FSub)  = compileBinOp fooi AST.FSub $ fBitSize bs
+compileInstr (Struct.FBinOp bs Struct.FMul)  = compileBinOp fooi AST.FMul $ fBitSize bs
+compileInstr (Struct.FBinOp bs Struct.FDiv)  = compileBinOp fooi AST.FDiv $ fBitSize bs
+compileInstr (Struct.FBinOp bs Struct.FMin)  = callExternal $ "llvm.minnum.f" ++ sBitSize bs
+compileInstr (Struct.FBinOp bs Struct.FMax)  = callExternal $ "llvm.maxnum.f" ++ sBitSize bs
 -- value of the first argument, sign of the second argument
-compileInstr (S.FBinOp bs S.FCopySign) = callExternal $ "llvm.copysign.f" ++ sBitSize bs
+compileInstr (Struct.FBinOp bs Struct.FCopySign) = callExternal $ "llvm.copysign.f" ++ sBitSize bs
 
-compileInstr (S.FRelOp _  S.FEq)   = compileCmpOp AST.FCmp FPred.OEQ
-compileInstr (S.FRelOp _  S.FNe)   = compileCmpOp AST.FCmp FPred.ONE
-compileInstr (S.FRelOp _  S.FLt)   = compileCmpOp AST.FCmp FPred.OLT
-compileInstr (S.FRelOp _  S.FGt)   = compileCmpOp AST.FCmp FPred.OGT
-compileInstr (S.FRelOp _  S.FLe)   = compileCmpOp AST.FCmp FPred.OLE
-compileInstr (S.FRelOp _  S.FGe)   = compileCmpOp AST.FCmp FPred.OGE
+compileInstr (Struct.FRelOp _  Struct.FEq)   = compileCmpOp AST.FCmp FPred.OEQ
+compileInstr (Struct.FRelOp _  Struct.FNe)   = compileCmpOp AST.FCmp FPred.ONE
+compileInstr (Struct.FRelOp _  Struct.FLt)   = compileCmpOp AST.FCmp FPred.OLT
+compileInstr (Struct.FRelOp _  Struct.FGt)   = compileCmpOp AST.FCmp FPred.OGT
+compileInstr (Struct.FRelOp _  Struct.FLe)   = compileCmpOp AST.FCmp FPred.OLE
+compileInstr (Struct.FRelOp _  Struct.FGe)   = compileCmpOp AST.FCmp FPred.OGE
 
-compileInstr S.Select              = do
+compileInstr Struct.Select              = do
   (phiC, cond)  <- popOperand
   (phiF, false) <- popOperand
   (phiT, true)  <- popOperand
   let opType = operandType true
   selectInstr   <- newNamedInstruction opType $ AST.Select cond true false []
-  let instrs = phiC ++ phiF ++ phiT ++ [selectInstr]
+  let instrs = phiC ++ phiF ++ phiT ++ [I selectInstr]
   tell $ toLog "    emit: " instrs
-  pure $ fmap I instrs
+  pure instrs
 
-compileInstr (S.I32Const n)        = compileConst $ Constant.Int 32 $ fromIntegral n
-compileInstr (S.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegral n
-compileInstr (S.F32Const n)        = compileConst $ Constant.Float $ Float.Single n
-compileInstr (S.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
+compileInstr (Struct.I32Const n)        = compileConst $ Constant.Int 32 $ fromIntegral n
+compileInstr (Struct.I64Const n)        = compileConst $ Constant.Int 64 $ fromIntegral n
+compileInstr (Struct.F32Const n)        = compileConst $ Constant.Float $ Float.Single n
+compileInstr (Struct.F64Const n)        = compileConst $ Constant.Float $ Float.Double n
 
-compileInstr (S.SetGlobal n)       = throwError "not implemented: SetGlobal"
-compileInstr (S.TeeLocal n)        = do
-  -- if there is a constant associated to the variable, remove it
-  let ident = makeName "local" n
-  unassignConstant ident
+compileInstr (Struct.SetGlobal n)       = throwError "not implemented: SetGlobal"
+compileInstr (Struct.TeeLocal n)        = do
   (phi, a) <- peekOperand
-  case a of
-    (AST.LocalReference _ name) -> addRenameAction name ident
-    (AST.ConstantOperand const) -> assignConstant ident const
-    _                           -> throwError "unsupported operand"
-  tell ["    emit: " ++ show phi]
-  pure $ I <$> phi
+  let name = makeName "local" n
+  varType  <- gets $ flip (M.!) name . localVariableTypes
+  let ref   = AST.LocalReference (Type.ptr varType) name
+      instr = phi ++ [I $ AST.Do $ AST.Store False ref a Nothing 0 []]
+  tell $ toLog "    emit: " instr
+  pure instr
 
-compileInstr (S.SetLocal n)        = compileInstr (S.TeeLocal n) <> compileInstr S.Drop
-compileInstr (S.GetGlobal n)       = throwError "not implemented: GetGlobal"
+compileInstr (Struct.SetLocal n)        = foldMap compileInstr [Struct.TeeLocal n, Struct.Drop]
+compileInstr (Struct.GetGlobal n)       = throwError "not implemented: GetGlobal"
 
--- `<|>` is the choice operator. It tries the first branch, and if it fails,
--- goes on to try the second branch.
-compileInstr (S.GetLocal n)        = inBlockConst <|> outOfBlockConst <|> reference
-  where
-    inBlockConst    = do
-      constMap  <- gets localConst
-      blockID   <- gets $ makeName "block" . blockIdentifier
-      constants <- withMsg $ M.lookup name constMap
-      c         <- liftMaybe "no constants found." $ M.lookup blockID constants
-      pushOperand (AST.ConstantOperand c)
-      pure []
+compileInstr (Struct.GetLocal n)        = do
+  let name = makeName "local" n
+  varType <- gets $ flip (M.!) name . localVariableTypes
+  let ref = AST.LocalReference (Type.ptr varType) name
+  instr   <- newNamedInstruction varType $ AST.Load False ref Nothing 0 []
+  tell $ toLog "    emit: " [I instr]
+  pure [I instr]
 
-    outOfBlockConst = do
-      InstrST { localVariableTypes, localConst } <- get
-      blockID     <- gets $ makeName "block" . blockIdentifier
-      varType     <- withMsg $ M.lookup name localVariableTypes
-      constants   <- withMsg $ M.lookup name localConst
-      case M.assocs constants of
-        []       -> throwError "no constants found"
-        [(_, c)] -> pushOperand (AST.ConstantOperand c) $> []
-        l        -> do let operand = first AST.ConstantOperand . swap <$> l
-                       instr <- newNamedInstruction varType $ AST.Phi varType operand []
-                       tell $ toLog "    emit: " [instr]
-                       pure $ I <$> [instr]
-
-    reference = do
-      InstrST { localVariableTypes } <- get
-      operand <- withMsg $ AST.LocalReference <$> M.lookup name localVariableTypes <*> pure name
-      pushOperand operand
-      pure []
-
-    name      = makeName "local" n
-    liftMaybe = \msg -> maybe (throwError msg) pure
-    withMsg   = liftMaybe $ "unbound reference: " ++ show name
-
-compileInstr (S.Call i) = do
+compileInstr (Struct.Call i) = do
   ModEnv { functionTypes } <- ask
   let FT { arguments, returnType } = functionTypes M.! makeName "func" i
       name                         = makeName "func" i
-  compileFunctionCall name arguments returnType
+      function                     = AST.ConstantOperand
+                                   $ flip Constant.GlobalReference name
+                                   $ Type.FunctionType returnType arguments False
+  compileFunctionCall function arguments returnType
 
-compileInstr (S.CallIndirect i) = do
-  funcTypeMap <- asks functionTypeIndices
-  funcType    <- liftMaybe $ M.lookup i funcTypeMap
-  (phiI, idx) <- popOperand
-  tableRef    <- asks tableReference
-  let zero    = AST.ConstantOperand $ Constant.Int 32 0
-      getAddr = AST.GetElementPtr True tableRef [zero, idx] []  -- address of the function
-      funcPtrType = Type.ptr $ llvmize funcType
-      nArgs       = fromIntegral $ L.length $ arguments funcType
+compileInstr (Struct.CallIndirect i) = do
+  funcTypeMap                  <- asks functionTypeIndices
+  FT { arguments, returnType } <- liftMaybe $ M.lookup i funcTypeMap
+  tableRef                     <- asks tableReference
+  let zero        = AST.ConstantOperand $ Constant.Int 32 0
+      funcPtrType = Type.ptr $ Type.FunctionType returnType arguments False
   isize       <- isizeM
-  getPtrPtr   <- newNamedInstruction (Type.ptr isize) getAddr
-  (_, intPtr) <- popOperand
-  loadPtr     <- newNamedInstruction isize $ AST.Load False intPtr Nothing 0 []
-  (_, int)    <- popOperand
-  castPtr     <- newNamedInstruction funcPtrType $ AST.IntToPtr int funcPtrType []
+  (phiI, idx) <- popOperand
+  pushOperand tableRef
+  ptrInstrs   <- getEltPtr (Type.ptr isize) [zero, idx]
+              <> load isize
+              <> intToPtr funcPtrType
   (_, func)   <- popOperand
-  ops         <- replicateM (fromIntegral nArgs) popOperand
-  let (phis, args) = unzip ops
-      arguments    = reverse [(operand, []) | operand <- args]
-      retType      = returnType funcType
-  call        <- newNamedInstruction retType $ AST.Call Nothing Conv.C [] (Right func) arguments [] []
-  pure $ fmap I [getPtrPtr, loadPtr, castPtr, call]
+  callInstrs  <- compileFunctionCall func arguments returnType
+  pure $ ptrInstrs ++ callInstrs
     where
-      llvmize FT { arguments, returnType } = Type.FunctionType returnType arguments False
       liftMaybe = maybe (throwError "not a known function type") pure
 
-compileInstr S.Return = do
+compileInstr Struct.Return = do
   (phi, term) <- returnOperandStackItems
   blockID     <- gets $ makeName "block" . blockIdentifier
   deleteOperandStack blockID
   incrBlockIdentifier
   tell $ toLog "    return-emit: " phi
   tell $ toLog "    return-term: " [term]
-  pure $ (I <$> phi) ++ [T term]
+  pure $ phi ++ [T term]
 
-compileInstr (S.If _ b1 b2) = do
+compileInstr (Struct.If _ b1 b2) = do
   blockIndx <- gets blockIdentifier
   let b1Count    = countTerminals b1
       b2Count    = countTerminals b2
@@ -462,9 +462,9 @@ compileInstr (S.If _ b1 b2) = do
       b1Ident    = makeName "block" $ blockIndx + 1
       b2Ident    = makeName "block" $ blockIndx + b1Count + 2
       endIf      = makeName "block" $ blockIndx + b1Count + b2Count + 3
-      appendTerm = appendIfLast (not . wasmIsTerm) (S.Br 0)
+      appendTerm = appendIfLast (not . wasmIsTerm) (Struct.Br 0)
   pushOperand $ AST.ConstantOperand $ Constant.Int 32 0
-  neqz            <- compileInstr (S.IRelOp S.BS32 S.INe)
+  neqz            <- compileInstr (Struct.IRelOp Struct.BS32 Struct.INe)
   bitcast         <- castIntIfNotBitsize 1
   (_, operand)    <- popOperand
   incrBlockIdentifier
@@ -477,10 +477,10 @@ compileInstr (S.If _ b1 b2) = do
   let term = T $ AST.Do $ AST.CondBr operand b1Ident b2Ident []
   tell $ toLog "    if-emit: " $ bitcast ++ thenInstrs
   tell $ toLog "    if-term: " [term]
-  pure $ neqz ++ fmap I bitcast ++ fmap I thenInstrs ++ [term] ++ b1Compiled ++ b2Compiled
+  pure $ neqz ++ bitcast ++ thenInstrs ++ [term] ++ b1Compiled ++ b2Compiled
 
 -- the index here is the levels of scopes. It's a WASM peculiarity
-compileInstr (S.Br i)       = do
+compileInstr (Struct.Br i)       = do
   origin   <- gets $ makeName "block" . blockIdentifier
   dest     <- readScope $ fromIntegral i
   brInstrs <- moveOperandStack origin dest
@@ -488,13 +488,13 @@ compileInstr (S.Br i)       = do
   let term = AST.Do $ AST.Br dest []
   tell $ toLog "    br-emit: " brInstrs
   tell $ toLog "    br-term: " [term]
-  pure $ fmap I brInstrs ++ [T term]
+  pure $ brInstrs ++ [T term]
 
-compileInstr (S.BrIf i)     = do
+compileInstr (Struct.BrIf i)     = do
   blockIndx       <- gets blockIdentifier
   dest            <- readScope $ fromIntegral i
   pushOperand $ AST.ConstantOperand $ Constant.Int 32 0
-  neqz            <- compileInstr (S.IRelOp S.BS32 S.INe)
+  neqz            <- compileInstr (Struct.IRelOp Struct.BS32 Struct.INe)
   bitcast         <- castIntIfNotBitsize 1
   (_, operand)    <- popOperand
   let origin      = makeName "block" blockIndx
@@ -505,12 +505,12 @@ compileInstr (S.BrIf i)     = do
   let term = AST.Do $ AST.CondBr operand dest fallthrough []
   tell $ toLog "    brif-emit: " $ bitcast ++ brInstrs
   tell $ toLog "    brif-term: " [term]
-  pure $ neqz ++ fmap I bitcast ++ fmap I brInstrs ++ [T term]
+  pure $ neqz ++ bitcast ++ brInstrs ++ [T term]
 
-compileInstr (S.Block _ body) = do
+compileInstr (Struct.Block _ body) = do
   tell ["  begin block"]
   blockIndx <- gets blockIdentifier
-  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 0) body
+  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (Struct.Br 0) body
       numberOfBlocks = countTerminals wasmInstrs
       endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks
   pushScope endOfBlock
@@ -520,59 +520,60 @@ compileInstr (S.Block _ body) = do
   pure compiled
 
 -- the difference with Block is where the scope starts
-compileInstr (S.Loop _ body) = do
+compileInstr (Struct.Loop _ body) = do
   tell ["  begin loop"]
-  blockIndx <- gets blockIdentifier
-  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (S.Br 1) body
-      numberOfBlocks = countTerminals wasmInstrs
-      startOfBlock   = makeName "block" $ blockIndx + 1
-      endOfBlock     = makeName "block" $ blockIndx + numberOfBlocks + 1
+  origin       <- gets $ makeName "block" . blockIdentifier
+  incrBlockIdentifier
+  startOfBlock <- gets $ makeName "block" . blockIdentifier
+  let wasmInstrs     = appendIfLast (not . wasmIsTerm) (Struct.Br 1) body
       start          = T $ AST.Do $ AST.Br startOfBlock []
-  pushScope endOfBlock
   pushScope startOfBlock
-  compiled <- foldMap compileInstr wasmInstrs
-  popScope
+  brInstrs   <- branchOperandStack origin startOfBlock
+  compiled   <- foldMap compileInstr wasmInstrs
+  let nextBlock = gets (makeName "block" . (+1) . blockIdentifier)
+  endOfBlock <- readScope 1 <|> nextBlock
+  _          <- moveOperandStack origin (trace (show endOfBlock) endOfBlock)
+  _          <- moveOperandStack startOfBlock endOfBlock
   popScope
   tell ["  end loop"]
-  pure $ start : compiled
+  pure $ brInstrs ++ [start] ++ compiled
 
-compileInstr (S.I32Load  _) = compileLoadOp Type.i32
-compileInstr (S.I64Load  _) = compileLoadOp Type.i64
-compileInstr (S.F32Load  _) = compileLoadOp Type.float
-compileInstr (S.F64Load  _) = compileLoadOp Type.double
--- load one byte as i8, then sign extend to i32. `<>` in this context means
--- "then"
-compileInstr (S.I32Load8S  _) = compileLoadOp Type.i8  <> compileCastOp AST.SExt Type.i32
-compileInstr (S.I32Load8U  _) = compileLoadOp Type.i8  <> compileCastOp AST.ZExt Type.i32
-compileInstr (S.I32Load16S _) = compileLoadOp Type.i16 <> compileCastOp AST.SExt Type.i32
-compileInstr (S.I32Load16U _) = compileLoadOp Type.i16 <> compileCastOp AST.ZExt Type.i32
-compileInstr (S.I64Load8S  _) = compileLoadOp Type.i8  <> compileCastOp AST.SExt Type.i64
-compileInstr (S.I64Load8U  _) = compileLoadOp Type.i8  <> compileCastOp AST.ZExt Type.i64
-compileInstr (S.I64Load16S _) = compileLoadOp Type.i16 <> compileCastOp AST.SExt Type.i64
-compileInstr (S.I64Load16U _) = compileLoadOp Type.i16 <> compileCastOp AST.ZExt Type.i64
-compileInstr (S.I64Load32S _) = compileLoadOp Type.i32 <> compileCastOp AST.SExt Type.i64
-compileInstr (S.I64Load32U _) = compileLoadOp Type.i32 <> compileCastOp AST.ZExt Type.i64
+compileInstr (Struct.I32Load  _) = compileLoadOp Type.i32
+compileInstr (Struct.I64Load  _) = compileLoadOp Type.i64
+compileInstr (Struct.F32Load  _) = compileLoadOp Type.float
+compileInstr (Struct.F64Load  _) = compileLoadOp Type.double
+-- load one byte as i8, then sign extend to i32.
+compileInstr (Struct.I32Load8S  _) = compileLoadOp Type.i8  <> compileCastOp AST.SExt Type.i32
+compileInstr (Struct.I32Load8U  _) = compileLoadOp Type.i8  <> compileCastOp AST.ZExt Type.i32
+compileInstr (Struct.I32Load16S _) = compileLoadOp Type.i16 <> compileCastOp AST.SExt Type.i32
+compileInstr (Struct.I32Load16U _) = compileLoadOp Type.i16 <> compileCastOp AST.ZExt Type.i32
+compileInstr (Struct.I64Load8S  _) = compileLoadOp Type.i8  <> compileCastOp AST.SExt Type.i64
+compileInstr (Struct.I64Load8U  _) = compileLoadOp Type.i8  <> compileCastOp AST.ZExt Type.i64
+compileInstr (Struct.I64Load16S _) = compileLoadOp Type.i16 <> compileCastOp AST.SExt Type.i64
+compileInstr (Struct.I64Load16U _) = compileLoadOp Type.i16 <> compileCastOp AST.ZExt Type.i64
+compileInstr (Struct.I64Load32S _) = compileLoadOp Type.i32 <> compileCastOp AST.SExt Type.i64
+compileInstr (Struct.I64Load32U _) = compileLoadOp Type.i32 <> compileCastOp AST.ZExt Type.i64
 
-compileInstr (S.I32Store  _) = compileStoreOp Type.i32
-compileInstr (S.I64Store  _) = compileStoreOp Type.i64
-compileInstr (S.F32Store  _) = compileStoreOp Type.float
-compileInstr (S.F64Store  _) = compileStoreOp Type.double
+compileInstr (Struct.I32Store  _) = compileStoreOp Type.i32
+compileInstr (Struct.I64Store  _) = compileStoreOp Type.i64
+compileInstr (Struct.F32Store  _) = compileStoreOp Type.float
+compileInstr (Struct.F64Store  _) = compileStoreOp Type.double
 -- not sure how to wrap integers in LLVM
--- compileInstr (S.I32Store8  (S.MemArg _ algn)) = compileStoreOp algn Type.i8
--- compileInstr (S.I32Store16 (S.MemArg _ algn)) = compileStoreOp algn Type.i16
--- compileInstr (S.I64Store8  (S.MemArg _ algn)) = compileStoreOp algn Type.i8
--- compileInstr (S.I64Store16 (S.MemArg _ algn)) = compileStoreOp algn Type.i16
--- compileInstr (S.I64Store32 (S.MemArg _ algn)) = compileStoreOp algn Type.i32
+-- compileInstr (Struct.I32Store8  (Struct.MemArg _ algn)) = compileStoreOp algn Type.i8
+-- compileInstr (Struct.I32Store16 (Struct.MemArg _ algn)) = compileStoreOp algn Type.i16
+-- compileInstr (Struct.I64Store8  (Struct.MemArg _ algn)) = compileStoreOp algn Type.i8
+-- compileInstr (Struct.I64Store16 (Struct.MemArg _ algn)) = compileStoreOp algn Type.i16
+-- compileInstr (Struct.I64Store32 (Struct.MemArg _ algn)) = compileStoreOp algn Type.i32
 
 --LLVM: ??
---compileInstr S.CurrentMemory = compileStoreOp S.BS64 boomwi 
+--compileInstr Struct.CurrentMemory = compileStoreOp Struct.BS64 boomwi 
 --LLVM: Alloca
--- compileInstr S.GrowMemory = compileMemGrow
+-- compileInstr Struct.GrowMemory = compileMemGrow
 
 
 compileInstr instr = throwError $ "not implemented: " ++ show instr
 
-castIntIfNotBitsize :: Word32 -> InstrGen [AST.Named AST.Instruction]
+castIntIfNotBitsize :: Word32 -> InstrGen [LLVMInstr]
 castIntIfNotBitsize bs = upcast <|> downcast <|> mempty
   where
     operandBS (Operand.LocalReference (Type.IntegerType bs) _) = bs
@@ -587,21 +588,21 @@ castIntIfNotBitsize bs = upcast <|> downcast <|> mempty
       let bs' = operandBS bool
       guard $ pred bs bs'
       bitcast   <- newNamedInstruction targetType $ op bool targetType []
-      pure [bitcast]
+      pure [I bitcast]
 
-compileType :: S.ValueType -> Type.Type
-compileType S.I32 = Type.IntegerType 32
-compileType S.I64 = Type.IntegerType 64
-compileType S.F32 = Type.FloatingPointType Type.FloatFP
-compileType S.F64 = Type.FloatingPointType Type.DoubleFP
+compileType :: Struct.ValueType -> Type.Type
+compileType Struct.I32 = Type.IntegerType 32
+compileType Struct.I64 = Type.IntegerType 64
+compileType Struct.F32 = Type.FloatingPointType Type.FloatFP
+compileType Struct.F64 = Type.FloatingPointType Type.DoubleFP
 
-compileFunctionType :: S.FuncType -> FunctionType
-compileFunctionType S.FuncType { S.params, S.results } = FT arguments returnType
+compileFunctionType :: Struct.FuncType -> FunctionType
+compileFunctionType Struct.FuncType { Struct.params, Struct.results } = FT arguments returnType
   where
     arguments  = compileType <$> params
     returnType = compileRetTypeList results
 
-compileRetTypeList :: [S.ValueType] -> Type.Type
+compileRetTypeList :: [Struct.ValueType] -> Type.Type
 compileRetTypeList []  = Type.VoidType
 compileRetTypeList [t] = compileType t
 compileRetTypeList l   = Type.StructureType True $ compileType <$> l
@@ -610,38 +611,37 @@ isizeM :: (MonadReader ModEnv m) => m Type.Type
 isizeM = asks $ Type.IntegerType . nativeWordWidth
 
 -- compiles one WASM function into an LLVM function.
-compileFunction :: Name.Name -> S.Function -> ModGen Global.Global
+compileFunction :: Name.Name -> Struct.Function -> ModGen (S.Set Name.Name, [Global.Global])
 compileFunction ident func = evalInstrGen instrGen initExprST
   where
-    initExprST = InstrST M.empty 0 0 ident [] M.empty M.empty M.empty
+    initExprST = InstrST M.empty 0 0 ident [] M.empty S.empty
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
 
     isStart func = Global.name func == Name.mkName "_main"
 
-    funcName = do
-      i <- asks startFunctionIndex
-      pure $ maybe ident (const "_main")
-           $ guard . ((==ident) . makeName "func") =<< i
-
     initMem = do
-      name      <- funcName
-      guard $ name /= ident
+      guard $ ident == "_main"
       minSize   <- asks memoryMinSize
+      memRef    <- asks memoryReference
+      isize     <- isizeM
       size      <- sizeT $ minSize * 64000
       _         <- compileInstr size
       malloc    <- callExternal "malloc"
-      (_, ptr)  <- popOperand
-      memRef    <- asks memoryReference
-      isize     <- isizeM
-      castInstr <- newNamedInstruction isize $ AST.PtrToInt ptr isize []
+      castInstr <- ptrToInt isize
       (_, int)  <- popOperand
       let storeInstr = AST.Do $ AST.Store False memRef int Nothing 0 []
-      pure $ malloc ++ [I castInstr, I storeInstr]
+      pure $ malloc ++ castInstr ++ [I storeInstr]
+
+    dropMem = do
+      guard $ ident == "_main"
+      isize   <- isizeM
+      memRef  <- asks memoryReference
+      pushOperand memRef
+      load isize <> intToPtr (Type.ptr Type.i8) <> callExternal "free"
 
     initTbl = do
-      name        <- funcName
-      guard $ name /= ident
+      guard $ ident == "_main"
       tblElems    <- asks tableElements
       foldMap (uncurry funcRefToInt) $ M.toList tblElems
 
@@ -663,60 +663,68 @@ compileFunction ident func = evalInstrGen instrGen initExprST
       let storePtr = AST.Do $ AST.Store False tblEltPtr funcPtrInt Nothing 0 []
       pure [I castInstr, I getEltPtr, I storePtr]
 
-    dropMem = undefined
+    allocStack = do
+      argTypes <- asks $ arguments . flip (M.!) ident . functionTypes
+      let localTypes = compileType <$> Struct.localTypes func
+      pure $ foldMap alloc
+           $ zip3 [0..] (argTypes ++ localTypes)
+           $ fmap (const True) argTypes ++ repeat False
+
+    alloc (i, t, isArg) | isArg     = allocInstr ++ initWithArg
+                        | otherwise = allocInstr
+      where
+        initWithArg = [I $ AST.Do $ AST.Store False ident arg Nothing 0 []]
+        allocInstr  = [I $ makeName "local" i AST.:= AST.Alloca t Nothing 0 []]
+        ident       = AST.LocalReference (Type.ptr t) name
+        arg         = AST.LocalReference t $ makeName "arg" i
+        name        = makeName "local" i
 
     sizeT int = case arch of
-                   "x86_64" -> pure $ S.I64Const $ fromIntegral int
-                   "i386"   -> pure $ S.I32Const $ fromIntegral int
-                   "ia64"   -> pure $ S.I64Const $ fromIntegral int
-                   "arm"    -> pure $ S.I32Const $ fromIntegral int
+                   "x86_64" -> pure $ Struct.I64Const $ fromIntegral int
+                   "i386"   -> pure $ Struct.I32Const $ fromIntegral int
+                   "ia64"   -> pure $ Struct.I64Const $ fromIntegral int
+                   "arm"    -> pure $ Struct.I32Const $ fromIntegral int
                    _        -> throwError "not a supported architecture"
 
-    -- split the list of `LLVMObj` into blocks by looking for terminators. The
-    -- terminators and the code in the corresponding blocks are then
-    -- separated into an 'association list.'
-    -- FIXME: splitAfter is not good enough since some blocks are nested under
-    -- `if` in WASM (and possibly other instructions). These need to be
-    -- un-nested into their own blocks in LLVM.
     instrGen    = do
       tell ["func def: " ++ show ident]
-      name                         <- funcName
       -- initialize memory if it is the main function
       memInitInstrs                <- initMem <|> mempty
       tblInitInstrs                <- initTbl <|> mempty
+      dropInstrs                   <- dropMem <|> mempty
+      initStack                    <- allocStack
       -- compile function type information
       FT { arguments, returnType } <- asks $ flip (M.!) ident . functionTypes
       let paramList  = do
             (i, t) <- zip [0..] arguments
-            pure $ Global.Parameter t (makeName "local" i) []
+            pure $ Global.Parameter t (makeName "arg" i) []
           parameters = (paramList, False)
-          -- if indx == startIndex then "main" else "func{indx}". All the extra code
-          -- handle the fact that startIndex may or may not have a value
-          localTypes = compileType <$> S.localTypes func
+          localTypes = compileType <$> Struct.localTypes func
           localVariables = do
             (n, t) <- zip [0..] $ arguments ++ localTypes
             pure (makeName "local" n, t)
       modify $ \st -> st { localVariableTypes = M.fromAscList localVariables }
       -- compile basic blocks and collect the results
-      instrs              <- foldMap compileInstr $ Language.Wasm.Structure.body func
-      llvmInstrs          <- renameInstrs instrs
+      llvmInstrs          <- foldMap compileInstr $ Language.Wasm.Structure.body func
       (phis, returnInstr) <- returnOperandStackItems
+      externFs            <- gets externalFuncs
       let blks = splitAfter isTerm
                $ appendIfLast (not . isRet) (T returnInstr)
-               $ memInitInstrs ++ tblInitInstrs ++ llvmInstrs ++ fmap I phis
+               $ memInitInstrs ++ tblInitInstrs ++ initStack ++ llvmInstrs ++ phis ++ dropInstrs
           basicBlocks = fmap (buildBlock . assignName)
                       $ zip [0..]
                       $ fromMaybe (error "empty block")
                       $ traverse unsnoc blks
-      pure $ Global.functionDefaults { Global.basicBlocks
-                                     , Global.name
-                                     , Global.returnType
-                                     , Global.parameters }
+          func = Global.functionDefaults { Global.basicBlocks
+                                         , Global.name = ident
+                                         , Global.returnType
+                                         , Global.parameters }
+      pure (externFs, [func])
 
     buildBlock (name, term, instrs) = AST.BasicBlock name (unwrapI <$> instrs) (unwrapT term)
 
     isRet (T (AST.Do (AST.Ret _ _))) = True
-    isRet _                              = False
+    isRet _                          = False
 
     unwrapT (T t) = t
     unwrapT instr = error $ "Not an LLVM terminator: " ++ show instr
@@ -724,19 +732,10 @@ compileFunction ident func = evalInstrGen instrGen initExprST
     unwrapI (I i) = i
     unwrapI term  = error $ "Not an LLVM instruction: " ++ show term
 
-    -- rename instructions to reflect "variable" assignments
-    renameInstrs = traverse renameInstr
-      where
-        renameInstr :: LLVMInstr -> InstrGen LLVMInstr
-        renameInstr (I ((AST.:=) name instr)) = gets $ I . flip (AST.:=) instr . rename name
-        renameInstr t@(I _)                   = pure t
-        renameInstr t@(T _)                   = pure t
-        rename name = fromMaybe name . M.lookup name . renameMap
-
 -- FIXME: use linear memory
 -- globals in the WASM sense of the term
-compileGlobals :: Natural -> S.Global -> ModGen AST.Global
-compileGlobals index global = undefined
+processGlobals :: Natural -> Struct.Global -> ModGen AST.Global
+processGlobals index global = undefined
   -- where
   --   globVar     = do
   --     init' <- init
@@ -748,9 +747,9 @@ compileGlobals index global = undefined
   --                                       }
 
   --   name       = makeName "global" index
-  --   isConstant = isConst $ S.globalType global
-  --   type'      = compileType' $ S.globalType global
-  --   exp        = foldMap compileInstr $ S.initializer global
+  --   isConstant = isConst $ Struct.globalType global
+  --   type'      = compileType' $ Struct.globalType global
+  --   exp        = foldMap compileInstr $ Struct.initializer global
   --   -- TODO: maybe there's a way around this? The wasm specs says
   --   -- the initializer should be `expr` which could really be
   --   -- anything. Not sure how to implement that into LLVM though.
@@ -760,48 +759,17 @@ compileGlobals index global = undefined
   --                   pure c
 
 
-  --   isConst (S.Const _) = True
+  --   isConst (Struct.Const _) = True
   --   isConst _           = False
 
-  --   compileType' (S.Const t) = compileType t
-  --   compileType' (S.Mut   t) = compileType t
+  --   compileType' (Struct.Const t) = compileType t
+  --   compileType' (Struct.Mut   t) = compileType t
 
---compileImports :: Natural -> S.Import -> ModGen AST.Global
+--compileImports :: Natural -> Struct.Import -> ModGen AST.Global
 --compileImports index i = importItem
 --  where importItem = do
 --       pure $ Global.functionDefaults { Global.basicBlocks,
 --                                         }
-
--- TODO: tables, elems
--- TODO: mems
-
---  t.load memarg and t.loadN_sx memarg
-
---  1. Let F be the current frame.
---  2. Assert: due to validation, F.module.memaddrs[0] exists.
---  3. Let a be the memory address F.module.memaddrs[0].
---  4. Assert: due to validation, S.mems[a] exists.
---  5. Let mem be the memory instance S.mems[a].
---  6. Assert: due to validation, a value of value type i32 is on the top of the stack.
---  7. Pop the value i32.const i from the stack.
---  8. Let ea be the integer i+memarg.offset.
---  9. If N is not part of the instruction, then:
---  a. Let N be the bit width |t| of value type t.
---  10. If ea+N/8 is larger than the length of mem.data, then:
---  a. Trap.
---  11. Let b∗ be the byte sequence mem.data[ea:N/8].
---  12. If N and sx are part of the instruction, then:
---  a. Let n be the integer for which bytesiN(n)=b∗.
---  b. Let c be the result of computing extend_sxN,|t|(n).
---  13. Else:
---  a. Let c be the constant for which bytest(c)=b∗.
---  14. Push the value t.const c to the stack.
-
--- load addr
--- local.set $x
-
--- %tmp0 = load ...
--- %..   = add i32 ... %tmp0
 
 -- compileMemGrow :: InstrGen [LLVMInstr]
 -- compileMemGrow  = do
@@ -813,7 +781,7 @@ compileGlobals index global = undefined
 -- TODO: datas
 -- TODO: imports
 -- TODO: exports
-compileModule :: S.Module -> Either String AST.Module
+compileModule :: Struct.Module -> Either String AST.Module
 compileModule wasmMod = do
   wordWidth    <- machineNativeWordWidth
   let memoryReference = AST.ConstantOperand
@@ -822,7 +790,7 @@ compileModule wasmMod = do
                       $ Type.IntegerType wordWidth
 
       -- set up table
-      elemNames     = [makeName "func" i | S.ElemSegment _ _ index <- wasmElements, i <- index]
+      elemNames     = [makeName "func" i | Struct.ElemSegment _ _ index <- wasmElements, i <- index]
       tableElements = M.fromList $ zip [0..] elemNames
       nElems        = length elemNames
       isize         = Type.IntegerType wordWidth
@@ -849,14 +817,14 @@ compileModule wasmMod = do
                                                  }
 
       modGen = do
-        globals  <- traverse (uncurry compileGlobals) wasmGlobals
+        globals           <- traverse (uncurry processGlobals) wasmGlobals
         -- imports <- traverse (uncurry compileImports) wasmImports
-        funcs    <- traverse (uncurry compileFunction) wasmFuncs
-        -- funcs <- initMem 
+        compilationOutput <- traverse (uncurry compileFunction) wasmFuncs
+        let (decls, funcs) = mconcat compilationOutput
+            externs        = filter (flip S.member decls . Global.name) externalFunctions
 
-        let globalDefs = AST.GlobalDefinition <$> table : minMemorySize : memory : externalFunctions ++ funcs
+        let globalDefs = AST.GlobalDefinition <$> table : minMemorySize : memory : externs ++ funcs
             typeDefs   = [tableTypeDef]
-            -- typeDefs   = []
 
         pure $ AST.defaultModule { AST.moduleName = "basic"
                                  , AST.moduleDefinitions = typeDefs ++ globalDefs
@@ -876,25 +844,29 @@ compileModule wasmMod = do
 
   evalModGen modGen initModEnv
     where
-      startFunctionIndex  = (\(S.StartFunction n) -> n) <$> S.start wasmMod
-      extractFuncType     = compileFunctionType . (S.types wasmMod !!) . fromIntegral . S.funcType
+      startFunctionIndex  = (\(Struct.StartFunction n) -> n) <$> Struct.start wasmMod
+      extractFuncType     = compileFunctionType . (Struct.types wasmMod !!) . fromIntegral . Struct.funcType
       functionTypes       = M.fromList
-                          $ zip [makeName "func" i | i <- [0..]] 
-                          $ extractFuncType <$> S.functions wasmMod
-      functionTypeIndices = M.fromList $ zip [0..] $ compileFunctionType <$> S.types wasmMod
+                          $ zip funcNames
+                          $ extractFuncType <$> Struct.functions wasmMod
+      functionTypeIndices = M.fromList $ zip [0..] $ compileFunctionType <$> Struct.types wasmMod
       tableReference      = AST.ConstantOperand 
                           $ flip Constant.GlobalReference (Name.mkName "wasmc.tbl")
                           $ Type.ptr
                           $ Type.NamedTypeReference (Name.mkName "wasmc.tbl")
-      (minSize, maxSize)  = maybe (0, Nothing) ((\(S.Memory (S.Limit n x)) -> (n, x)) . fst)
+      (minSize, maxSize)  = maybe (0, Nothing) ((\(Struct.Memory (Struct.Limit n x)) -> (n, x)) . fst)
                           $ L.uncons
-                          $ S.mems wasmMod
-      wasmGlobals         = zip [0..] $ S.globals wasmMod
-      wasmFuncs           = zip [makeName "func" i | i <- [0..]] $ S.functions wasmMod
-      wasmElements        = S.elems wasmMod
+                          $ Struct.mems wasmMod
+      wasmGlobals         = zip [0..] $ Struct.globals wasmMod
+      wasmData            = Struct.datas wasmMod
+      wasmFuncs           = zip funcNames $ Struct.functions wasmMod
+      funcName i          = maybe (makeName "func" i) (const "_main")
+                          $ guard . (==i) =<< startFunctionIndex
+      funcNames           = funcName <$> [0..]
+      wasmElements        = Struct.elems wasmMod
 
---  wasmImports         = zip [0..] $ S.imports wasmMod
+--  wasmImports         = zip [0..] $ Struct.imports wasmMod
 
 
-parseModule :: B.ByteString -> Either String S.Module
+parseModule :: B.ByteString -> Either String Struct.Module
 parseModule = Wasm.parse

@@ -18,13 +18,15 @@ void tick() {
 
 void render() {
     for (int y = 0; y < 50; y++) {
+        mvaddch(y+1,0,'|');
         for (int x = 0; x < 50; x++) {
             if (getCell(x, y) > 0) {
-                mvaddch(y+1,x,'0');
+                mvaddch(y+1,x+1,'0');
             } else {
-                mvaddch(y+1,x,'_');
+                mvaddch(y+1,x+1,'_');
             }
         }
+        mvaddch(y+1,51,'|');
     }
     refresh();
 }
@@ -65,7 +67,7 @@ int main(int argc, char *argv[]) {
 
   for (int i=0; i<gens; i++) {
     //   fprintf(stderr, "ticky\n");
-      mvaddstr(0,0,"------------------------gen------------------------\n");
+      mvaddstr(0,0,"____________________________________________________\n");
       render();
       tick();
     //   fprintf(stderr, "tocky\n");

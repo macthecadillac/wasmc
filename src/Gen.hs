@@ -11,6 +11,7 @@ import Control.Monad.State
 import Control.Monad.Writer
 import Data.Bifunctor
 import qualified Data.Map as M
+import qualified Data.Set as S
 import Data.Maybe
 import qualified Data.List as L
 import Data.Tuple
@@ -27,6 +28,10 @@ import qualified LLVM.AST.Type as Type
 
 import Utils (makeName, operandType, toLog)
 
+data LLVMInstr = I (AST.Named AST.Instruction)
+               | T (AST.Named AST.Terminator)
+               deriving (Show)
+
 type NestedMap a = M.Map Name.Name (M.Map Name.Name a)
 
 data OperandStack = OpS { currentBlock :: [AST.Operand]
@@ -39,17 +44,13 @@ data InstrST = InstrST { operandStack :: M.Map Name.Name OperandStack -- stack o
                        , blockIdentifier :: Natural
                        , funcIdentifier :: Name.Name
                        , blockScopeStack :: [Name.Name]
-                       , renameMap :: M.Map Name.Name Name.Name
-                       , localConst :: NestedMap Constant.Constant  -- the constants associated with the identifier of the incoming block
-                       , localVariableTypes :: M.Map Name.Name Type.Type }
+                       , localVariableTypes :: M.Map Name.Name Type.Type
+                       , externalFuncs :: S.Set Name.Name
+                       }
                        deriving (Show)
 
 data FunctionType = FT { arguments :: [Type.Type], returnType :: Type.Type }
   deriving (Show)
-
-
--- data MemFunctionType = MFT { arguments :: [Type.Type], returnPtrType :: Type.Type }
---   deriving (Show)
 
 -- a record for per-module constants
 data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
@@ -90,13 +91,10 @@ evalModGen :: ModGen a -> ModEnv -> Either String a
 evalModGen a r = first (\e -> "Error: " ++ e ++ log) val
   where
     log = "\n\nLog:\n" ++ L.intercalate "\n" logLines ++ "\n<---Error"
-    (val, logLines) = runWriter (runReaderT (runExceptT (_modGen a)) r)
+    (val, logLines) = runWriter $ runReaderT (runExceptT $ _modGen a) r
 
 evalInstrGen :: InstrGen a -> InstrST -> ModGen a
 evalInstrGen a = evalStateT (_funcGen a)
-
-runInstrGen :: InstrGen a -> InstrST -> ModGen (a, InstrST)
-runInstrGen a = runStateT (_funcGen a)
 
 popScope :: InstrGen ()
 popScope = do
@@ -112,37 +110,17 @@ readScope i = do
   scopeStack <- gets blockScopeStack
   maybe (throwError "Undefined scope") (pure . snd) $ L.find ((i==) . fst) $ zip [0..] scopeStack
 
--- seriously, consider using lens
-unassignConstant :: Name.Name -> InstrGen ()
-unassignConstant name = do
-  blockID <- gets $ makeName "block" . blockIdentifier
-  let f (Just m) = Just $ M.delete blockID m
-      f Nothing  = Nothing
-  modify $ \st -> st { localConst = M.alter f name $ localConst st }
-
-assignConstant :: Name.Name -> Constant.Constant -> InstrGen ()
-assignConstant name const = do
-  blockID <- gets $ makeName "block" . blockIdentifier
-  let f (Just m) = Just $ M.insert blockID const m
-      f Nothing  = Just $ M.singleton blockID const
-  modify $ \st -> st { localConst = M.alter f name $ localConst st }
-
-addRenameAction :: Name.Name -> Name.Name -> InstrGen ()
-addRenameAction name newName = modify $ \st ->
-  st { renameMap = M.insert name newName $ renameMap st }
-
 -- pop operand off the `operandStack`
 -- the rename action here should always be valid because of SSA and because we
 -- do not reuse identifiers
-popOperand :: InstrGen ([AST.Named AST.Instruction], AST.Operand)
+popOperand :: InstrGen ([LLVMInstr], AST.Operand)
 popOperand = do
   blockID      <- gets $ makeName "block" . blockIdentifier
   opStack      <- gets operandStack
   localStack   <- liftMaybe $ M.lookup blockID opStack
   (op, rest)   <- liftMaybe $ uncons blockID localStack
-  operands     <- gets ((fmap . rename) . renameMap) <*> pure op
   modify $ \st -> st { operandStack = M.insert blockID rest opStack }
-  (instrs, op) <- combine operands
+  (instrs, op) <- combine $ swap <$> op
   tell $ toLog "    pop operand--emit: " instrs
   tell $ toLog "    pop operand--op: " [op]
   pure (instrs, op)
@@ -172,7 +150,7 @@ popOperand = do
             instr  = ident AST.:= AST.Phi opType ops []
             op     = AST.LocalReference opType ident
         incrLocalIdentifier
-        pure ([instr], op)
+        pure ([I instr], op)
 
 pushOperand :: AST.Operand -> InstrGen ()
 pushOperand op = do
@@ -185,7 +163,7 @@ pushOperand op = do
 pushOperands :: [AST.Operand] -> InstrGen ()
 pushOperands = mapM_ pushOperand
 
-peekOperand :: InstrGen ([AST.Named AST.Instruction], AST.Operand)
+peekOperand :: InstrGen ([LLVMInstr], AST.Operand)
 peekOperand = do
   (phi, op) <- popOperand
   pushOperand op
@@ -195,7 +173,7 @@ deleteOperandStack :: Name.Name -> InstrGen ()
 deleteOperandStack name = modify $ \st ->
   st { operandStack = M.delete name $ operandStack st }
 
-branchOperandStack :: Name.Name -> Name.Name -> InstrGen [AST.Named AST.Instruction]
+branchOperandStack :: Name.Name -> Name.Name -> InstrGen [LLVMInstr]
 branchOperandStack origin dest = do
   InstrST { operandStack, localIdentifier } <- get
   let originStack  = fromMaybe (OpS [] M.empty) $ M.lookup origin operandStack
@@ -206,18 +184,18 @@ branchOperandStack origin dest = do
                      , localIdentifier = n }
   pure phis
 
-moveOperandStack :: Name.Name -> Name.Name -> InstrGen [AST.Named AST.Instruction]
+moveOperandStack :: Name.Name -> Name.Name -> InstrGen [LLVMInstr]
 moveOperandStack origin dest = do
   phis <- branchOperandStack origin dest
   deleteOperandStack origin
   pure phis
 
-collapseStacks :: Natural -> OperandStack -> Either String (Natural, [AST.Named AST.Instruction], [AST.Operand])
+collapseStacks :: Natural -> OperandStack -> Either String (Natural, [LLVMInstr], [AST.Operand])
 collapseStacks n (OpS stack map) = do
   stacks         <- transpose $ toTupleList map
   (combined, n') <- runExcept $ runStateT (traverse combine stacks) n
   let (phis, operands) = unzip combined
-  pure (n', phis, stack ++ operands)
+  pure (n', I <$> phis, stack ++ operands)
     where
       combine []                 = throwError "empty sub-stack"
       combine ops@((fstOp, _):_) = do
@@ -259,7 +237,7 @@ newNamedInstruction idType        instr = do
   incrLocalIdentifier
   pure (name AST.:= instr)
 
-returnOperandStackItems :: InstrGen ([AST.Named AST.Instruction], AST.Named AST.Terminator)
+returnOperandStackItems :: InstrGen ([LLVMInstr], AST.Named AST.Terminator)
 returnOperandStackItems = do
   blockID        <- gets $ makeName "block" . blockIdentifier
   opStack        <- gets operandStack
@@ -268,7 +246,7 @@ returnOperandStackItems = do
   (n, phis, ops) <- liftEither $ collapseStacks tmpID localStack
   modify $ \st -> st { localIdentifier = n }
   (instrs, ret)  <- collapseOps ops
-  pure (phis ++ instrs, AST.Do $ AST.Ret ret [])
+  pure (phis ++ fmap I instrs, AST.Do $ AST.Ret ret [])
     where
       collapseOps []  = pure ([], Nothing)
       collapseOps [x] = pure ([], Just x)

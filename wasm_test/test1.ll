@@ -22,177 +22,204 @@ declare external ccc  void @free(i8*)
 declare external ccc  float @llvm.ceil.f32(float)    
 
 
-declare external ccc  double @llvm.ceil.f64(double)    
-
-
-declare external ccc  float @llvm.copysign.f32(float, float)    
-
-
-declare external ccc  double @llvm.copysign.f64(double, double)    
-
-
 declare external ccc  i32 @llvm.ctlz.i32(i32, i1)    
-
-
-declare external ccc  i64 @llvm.ctlz.i64(i64, i1)    
 
 
 declare external ccc  i32 @llvm.ctpop.i32(i32)    
 
 
-declare external ccc  i64 @llvm.ctpop.i64(i64)    
-
-
 declare external ccc  i32 @llvm.cttz.i32(i32, i1)    
-
-
-declare external ccc  i64 @llvm.cttz.i64(i64, i1)    
 
 
 declare external ccc  float @llvm.fabs.f32(float)    
 
 
-declare external ccc  double @llvm.fabs.f64(double)    
-
-
 declare external ccc  float @llvm.floor.f32(float)    
-
-
-declare external ccc  double @llvm.floor.f64(double)    
-
-
-declare external ccc  float @llvm.maxnum.f32(float, float)    
-
-
-declare external ccc  double @llvm.maxnum.f64(double, double)    
-
-
-declare external ccc  float @llvm.minnum.f32(float, float)    
-
-
-declare external ccc  double @llvm.minnum.f64(double, double)    
-
-
-declare external ccc  float @llvm.roundeven.f32(float)    
-
-
-declare external ccc  double @llvm.roundeven.f64(double)    
 
 
 declare external ccc  float @llvm.sqrt.f32(float)    
 
 
-declare external ccc  double @llvm.sqrt.f64(double)    
-
-
 declare external ccc  float @llvm.trunc.f32(float)    
-
-
-declare external ccc  double @llvm.trunc.f64(double)    
 
 
 declare external ccc  i8* @malloc(i64)    
 
 
-define external ccc  i32 @func0(i32  %local0, i32  %local1, i32  %local2, i32  %local3, i32  %local4)    {
+define external ccc  i32 @func0(i32  %arg0, i32  %arg1, i32  %arg2, i32  %arg3, i32  %arg4)    {
 block0:
-  %tmp0 = add   i32 %local0, %local1 
-  %tmp1 = sub   i32 %tmp0, %local2 
-  %tmp2 = mul   i32 %tmp1, %local3 
-  %tmp3 = udiv  i32 %tmp2, %local4 
-  ret i32 %tmp3 
-}
-
-
-define external ccc  i32 @func1(i32  %local0, i32  %local1)    {
-block0:
-  %tmp0 = and i32 %local0, %local1 
-  %tmp1 = or i32 %local0, %local1 
+  %local0 = alloca i32 
+  store  i32 %arg0, i32* %local0 
+  %local1 = alloca i32 
+  store  i32 %arg1, i32* %local1 
+  %local2 = alloca i32 
+  store  i32 %arg2, i32* %local2 
+  %local3 = alloca i32 
+  store  i32 %arg3, i32* %local3 
+  %local4 = alloca i32 
+  store  i32 %arg4, i32* %local4 
+  %tmp0 = load  i32, i32* %local0 
+  %tmp1 = load  i32, i32* %local1 
   %tmp2 = add   i32 %tmp0, %tmp1 
-  %tmp3 = and i32 %local0, %local0 
-  %tmp4 = add   i32 %tmp2, %tmp3 
-  %tmp5 = or i32 %local1, %local1 
-  %tmp6 = add   i32 %tmp4, %tmp5 
-  %tmp7 = xor i32 %local0, %local1 
-  %tmp8 = add   i32 %tmp6, %tmp7 
-  %tmp9 = xor i32 %local0, %local0 
-  %tmp10 = add   i32 %tmp8, %tmp9 
-  %tmp11 = shl   i32 %local0, %local0 
-  %tmp12 = add   i32 %tmp10, %tmp11 
-  ret i32 %tmp12 
+  %tmp3 = load  i32, i32* %local2 
+  %tmp4 = sub   i32 %tmp2, %tmp3 
+  %tmp5 = load  i32, i32* %local3 
+  %tmp6 = mul   i32 %tmp4, %tmp5 
+  %tmp7 = load  i32, i32* %local4 
+  %tmp8 = udiv  i32 %tmp6, %tmp7 
+  ret i32 %tmp8 
 }
 
 
-define external ccc  float @func2(float  %local0)    {
+define external ccc  i32 @func1(i32  %arg0, i32  %arg1)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.fabs.f32(float  %local0)  
-  ret float %tmp0 
+  %local0 = alloca i32 
+  store  i32 %arg0, i32* %local0 
+  %local1 = alloca i32 
+  store  i32 %arg1, i32* %local1 
+  %tmp0 = load  i32, i32* %local0 
+  %tmp1 = load  i32, i32* %local1 
+  %tmp2 = and i32 %tmp0, %tmp1 
+  %tmp3 = load  i32, i32* %local0 
+  %tmp4 = load  i32, i32* %local1 
+  %tmp5 = or i32 %tmp3, %tmp4 
+  %tmp6 = add   i32 %tmp2, %tmp5 
+  %tmp7 = load  i32, i32* %local0 
+  %tmp8 = load  i32, i32* %local0 
+  %tmp9 = and i32 %tmp7, %tmp8 
+  %tmp10 = add   i32 %tmp6, %tmp9 
+  %tmp11 = load  i32, i32* %local1 
+  %tmp12 = load  i32, i32* %local1 
+  %tmp13 = or i32 %tmp11, %tmp12 
+  %tmp14 = add   i32 %tmp10, %tmp13 
+  %tmp15 = load  i32, i32* %local0 
+  %tmp16 = load  i32, i32* %local1 
+  %tmp17 = xor i32 %tmp15, %tmp16 
+  %tmp18 = add   i32 %tmp14, %tmp17 
+  %tmp19 = load  i32, i32* %local0 
+  %tmp20 = load  i32, i32* %local0 
+  %tmp21 = xor i32 %tmp19, %tmp20 
+  %tmp22 = add   i32 %tmp18, %tmp21 
+  %tmp23 = load  i32, i32* %local0 
+  %tmp24 = load  i32, i32* %local0 
+  %tmp25 = shl   i32 %tmp23, %tmp24 
+  %tmp26 = add   i32 %tmp22, %tmp25 
+  ret i32 %tmp26 
 }
 
 
-define external ccc  float @func3(float  %local0)    {
+define external ccc  float @func2(float  %arg0)    {
 block0:
-  %tmp0 = fmul float %local0, -1.000000e0 
-  ret float %tmp0 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.fabs.f32(float  %tmp0)  
+  ret float %tmp1 
 }
 
 
-define external ccc  float @func4(float  %local0)    {
+define external ccc  float @func3(float  %arg0)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.sqrt.f32(float  %local0)  
-  ret float %tmp0 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 = fmul float %tmp0, -1.000000e0 
+  ret float %tmp1 
 }
 
 
-define external ccc  float @func5(float  %local0, float  %local1, float  %local2)    {
+define external ccc  float @func4(float  %arg0)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.fabs.f32(float  %local0)  
-  %tmp1 = fmul float %local1, -1.000000e0 
-  %tmp2 = fadd float %tmp0, %tmp1 
-  %tmp3 =  call ccc  float  @llvm.sqrt.f32(float  %local2)  
-  %tmp4 = fadd float %tmp2, %tmp3 
-  ret float %tmp4 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.sqrt.f32(float  %tmp0)  
+  ret float %tmp1 
 }
 
 
-define external ccc  float @func6(float  %local0)    {
+define external ccc  float @func5(float  %arg0, float  %arg1, float  %arg2)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.ceil.f32(float  %local0)  
-  ret float %tmp0 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %local1 = alloca float 
+  store  float %arg1, float* %local1 
+  %local2 = alloca float 
+  store  float %arg2, float* %local2 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.fabs.f32(float  %tmp0)  
+  %tmp2 = load  float, float* %local1 
+  %tmp3 = fmul float %tmp2, -1.000000e0 
+  %tmp4 = fadd float %tmp1, %tmp3 
+  %tmp5 = load  float, float* %local2 
+  %tmp6 =  call ccc  float  @llvm.sqrt.f32(float  %tmp5)  
+  %tmp7 = fadd float %tmp4, %tmp6 
+  ret float %tmp7 
 }
 
 
-define external ccc  float @func7(float  %local0)    {
+define external ccc  float @func6(float  %arg0)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.floor.f32(float  %local0)  
-  ret float %tmp0 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.ceil.f32(float  %tmp0)  
+  ret float %tmp1 
 }
 
 
-define external ccc  float @func8(float  %local0)    {
+define external ccc  float @func7(float  %arg0)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.trunc.f32(float  %local0)  
-  ret float %tmp0 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.floor.f32(float  %tmp0)  
+  ret float %tmp1 
 }
 
 
-define external ccc  float @func9(float  %local0)    {
+define external ccc  float @func8(float  %arg0)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.floor.f32(float  %local0)  
-  ret float %tmp0 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.trunc.f32(float  %tmp0)  
+  ret float %tmp1 
 }
 
 
-define external ccc  float @func10(float  %local0, float  %local1, float  %local2, float  %local3)    {
+define external ccc  float @func9(float  %arg0)    {
 block0:
-  %tmp0 =  call ccc  float  @llvm.ceil.f32(float  %local0)  
-  %tmp1 =  call ccc  float  @llvm.floor.f32(float  %local1)  
-  %tmp2 = fadd float %tmp0, %tmp1 
-  %tmp3 =  call ccc  float  @llvm.trunc.f32(float  %local2)  
-  %tmp4 = fadd float %tmp2, %tmp3 
-  %tmp5 =  call ccc  float  @llvm.ceil.f32(float  %local3)  
-  %tmp6 = fadd float %tmp4, %tmp5 
-  ret float %tmp6 
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.floor.f32(float  %tmp0)  
+  ret float %tmp1 
+}
+
+
+define external ccc  float @func10(float  %arg0, float  %arg1, float  %arg2, float  %arg3)    {
+block0:
+  %local0 = alloca float 
+  store  float %arg0, float* %local0 
+  %local1 = alloca float 
+  store  float %arg1, float* %local1 
+  %local2 = alloca float 
+  store  float %arg2, float* %local2 
+  %local3 = alloca float 
+  store  float %arg3, float* %local3 
+  %tmp0 = load  float, float* %local0 
+  %tmp1 =  call ccc  float  @llvm.ceil.f32(float  %tmp0)  
+  %tmp2 = load  float, float* %local1 
+  %tmp3 =  call ccc  float  @llvm.floor.f32(float  %tmp2)  
+  %tmp4 = fadd float %tmp1, %tmp3 
+  %tmp5 = load  float, float* %local2 
+  %tmp6 =  call ccc  float  @llvm.trunc.f32(float  %tmp5)  
+  %tmp7 = fadd float %tmp4, %tmp6 
+  %tmp8 = load  float, float* %local3 
+  %tmp9 =  call ccc  float  @llvm.ceil.f32(float  %tmp8)  
+  %tmp10 = fadd float %tmp7, %tmp9 
+  ret float %tmp10 
 }
 
 
@@ -213,14 +240,17 @@ block0:
 }
 
 
-define external ccc  i32 @func13(i32  %local0)    {
+define external ccc  i32 @func13(i32  %arg0)    {
 block0:
+  %local0 = alloca i32 
+  store  i32 %arg0, i32* %local0 
   %tmp0 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 0 
   %tmp1 = load  i64, i64* %tmp0 
   %tmp2 = inttoptr i64 %tmp1 to i32 ()* 
   %tmp3 =  call ccc  i32  %tmp2()  
-  %tmp4 = add   i32 %tmp3, %local0 
-  ret i32 %tmp4 
+  %tmp4 = load  i32, i32* %local0 
+  %tmp5 = add   i32 %tmp3, %tmp4 
+  ret i32 %tmp5 
 }
 
 
@@ -234,30 +264,40 @@ block0:
 }
 
 
-define external ccc  i64 @func15(i64  %local0)    {
+define external ccc  i64 @func15(i64  %arg0)    {
 block0:
-  %tmp0 = icmp eq i64 %local0, 0 
-  %tmp1 = zext i1 %tmp0 to i32  
-  %tmp2 = icmp ne i32 %tmp1, 0 
-  %tmp3 = zext i1 %tmp2 to i32  
-  %tmp4 = trunc i32 %tmp3 to i1  
-  br i1 %tmp4, label %block1, label %block2 
+  %local0 = alloca i64 
+  store  i64 %arg0, i64* %local0 
+  %local1 = alloca i64 
+  %local2 = alloca i64 
+  store  i64 0, i64* %local1 
+  %tmp0 = load  i64, i64* %local0 
+  %tmp1 = icmp eq i64 %tmp0, 0 
+  %tmp2 = zext i1 %tmp1 to i32  
+  %tmp3 = icmp ne i32 %tmp2, 0 
+  %tmp4 = zext i1 %tmp3 to i32  
+  %tmp5 = trunc i32 %tmp4 to i1  
+  br i1 %tmp5, label %block1, label %block2 
 block1:
+  store  i64 42, i64* %local2 
   br label %block5 
 block2:
-  %tmp5 = icmp eq i64 %local0, 1 
-  %tmp6 = zext i1 %tmp5 to i32  
-  %tmp7 = icmp ne i32 %tmp6, 0 
+  %tmp6 = load  i64, i64* %local0 
+  %tmp7 = icmp eq i64 %tmp6, 1 
   %tmp8 = zext i1 %tmp7 to i32  
-  %tmp9 = trunc i32 %tmp8 to i1  
-  br i1 %tmp9, label %block3, label %block4 
+  %tmp9 = icmp ne i32 %tmp8, 0 
+  %tmp10 = zext i1 %tmp9 to i32  
+  %tmp11 = trunc i32 %tmp10 to i1  
+  br i1 %tmp11, label %block3, label %block4 
 block3:
+  store  i64 99, i64* %local2 
   br label %block5 
 block4:
+  store  i64 7, i64* %local2 
   br label %block5 
 block5:
-  %tmp10 = phi i64 [42, %block1], [99, %block3], [7, %block4] 
-  ret i64 %tmp10 
+  %tmp12 = load  i64, i64* %local2 
+  ret i64 %tmp12 
 }
 
 
@@ -296,6 +336,48 @@ block0:
 }
 
 
+define external ccc  i64 @func19(i64  %arg0)    {
+block0:
+  %local0 = alloca i64 
+  store  i64 %arg0, i64* %local0 
+  %local1 = alloca i64 
+  %local2 = alloca i64 
+  store  i64 0, i64* %local1 
+  store  i64 0, i64* %local2 
+  %tmp0 = load  i64, i64* %local1 
+  %tmp1 = load  i64, i64* %local0 
+  %tmp2 = icmp sge i64 %tmp0, %tmp1 
+  %tmp3 = zext i1 %tmp2 to i32  
+  %tmp4 = icmp ne i32 %tmp3, 0 
+  %tmp5 = zext i1 %tmp4 to i32  
+  %tmp6 = trunc i32 %tmp5 to i1  
+  br i1 %tmp6, label %block4, label %block1 
+block1:
+  br label %block2 
+block2:
+  %tmp7 = load  i64, i64* %local1 
+  %tmp8 = add   i64 %tmp7, 1 
+  store  i64 %tmp8, i64* %local1 
+  %tmp9 = load  i64, i64* %local2 
+  %tmp10 = load  i64, i64* %local1 
+  %tmp11 = add   i64 %tmp9, %tmp10 
+  store  i64 %tmp11, i64* %local2 
+  %tmp12 = load  i64, i64* %local0 
+  %tmp13 = load  i64, i64* %local1 
+  %tmp14 = icmp eq i64 %tmp12, %tmp13 
+  %tmp15 = zext i1 %tmp14 to i32  
+  %tmp16 = icmp ne i32 %tmp15, 0 
+  %tmp17 = zext i1 %tmp16 to i32  
+  %tmp18 = trunc i32 %tmp17 to i1  
+  br i1 %tmp18, label %block4, label %block3 
+block3:
+  br label %block2 
+block4:
+  %tmp19 = load  i64, i64* %local2 
+  ret i64 %tmp19 
+}
+
+
 define external ccc  void @_main()    {
 block0:
   %tmp0 =  call ccc  i8*  @malloc(i64  64000)  
@@ -307,5 +389,8 @@ block0:
   %tmp4 = ptrtoint i32 ()* @func12 to i64 
   %tmp5 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 1 
   store  i64 %tmp4, i64* %tmp5 
+  %tmp6 = load  i64, i64* @wasmc.linear_mem 
+  %tmp7 = inttoptr i64 %tmp6 to i8* 
+   call ccc  void  @free(i8*  %tmp7)  
   ret void 
 }

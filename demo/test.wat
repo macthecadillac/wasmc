@@ -3,7 +3,7 @@
 
   (memory $mem 1)
 
-  (start $main)
+  (start $_main)
 
   (table 18 funcref)
   (elem (i32.const 0)

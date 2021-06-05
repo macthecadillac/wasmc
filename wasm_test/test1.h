@@ -21,5 +21,6 @@ int func17(); /* calls helper that stores 300 in memory and return 47; func 17 l
 
 int func18(); /* popcount(6) + ctz(16) + clz(32) = 2 + 4 + 26 = 32 */
 
+long func19(long n);  // 0 + 1 + ... + n
 
 void _main();
