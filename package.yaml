@@ -31,6 +31,11 @@ dependencies:
 - llvm-hs-pure
 - llvm-hs-pretty
 - text
+- process
+- directory
+- tasty
+- tasty-hunit
+- random
 
 library:
   source-dirs: src
@@ -51,7 +56,7 @@ executables:
 
 tests:
   wasmc-test:
-    main:                Spec.hs
+    main:                Test.hs
     source-dirs:         test
     ghc-options:
     - -threaded

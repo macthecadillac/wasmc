@@ -236,9 +236,6 @@ int main()
 
     sigaction(SIGSEGV, &sa, NULL);
 
-    printf("Calling _main\n");
-    _main();
-    printf("After Main\n");
     int failed = 0, numTests = 16;
     int num1 = 5, num2 = 10;
 
@@ -252,6 +249,7 @@ int main()
     failed += control_flow_tests();
     failed += table_tests();
     failed += memory_tests();
+    wasmc_drop();
     printf("\nFailing (%d/%d) Tests", failed, numTests);
     return 0;
 }

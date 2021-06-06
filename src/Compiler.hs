@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Lib where
+module Compiler where
 
 import Control.Applicative
 import Control.Monad.Except
@@ -612,59 +612,12 @@ isizeM = asks $ Type.IntegerType . nativeWordWidth
 
 -- compiles one WASM function into an LLVM function.
 compileFunction :: Name.Name -> Struct.Function -> ModGen (S.Set Name.Name, [Global.Global])
-compileFunction ident func = evalInstrGen instrGen initExprST
+compileFunction name func = buildFunction instrs name
   where
-    initExprST = InstrST M.empty 0 0 ident [] M.empty S.empty
-
-    assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
-
-    isStart func = Global.name func == Name.mkName "_main"
-
-    initMem = do
-      guard $ ident == "_main"
-      minSize   <- asks memoryMinSize
-      memRef    <- asks memoryReference
-      isize     <- isizeM
-      size      <- sizeT $ minSize * 64000
-      _         <- compileInstr size
-      malloc    <- callExternal "malloc"
-      castInstr <- ptrToInt isize
-      (_, int)  <- popOperand
-      let storeInstr = AST.Do $ AST.Store False memRef int Nothing 0 []
-      pure $ malloc ++ castInstr ++ [I storeInstr]
-
-    dropMem = do
-      guard $ ident == "_main"
-      isize   <- isizeM
-      memRef  <- asks memoryReference
-      pushOperand memRef
-      load isize <> intToPtr (Type.ptr Type.i8) <> callExternal "free"
-
-    initTbl = do
-      guard $ ident == "_main"
-      tblElems    <- asks tableElements
-      foldMap (uncurry funcRefToInt) $ M.toList tblElems
-
-    funcRefToInt index name = do
-      FT { arguments, returnType } <- asks $ flip (M.!) name . functionTypes
-      let funcRef = AST.ConstantOperand
-                  $ flip Constant.GlobalReference name
-                  $ Type.ptr
-                  $ Type.FunctionType returnType arguments False
-          zero    = AST.ConstantOperand $ Constant.Int 32 0
-          offset  = AST.ConstantOperand $ Constant.Int 32 (fromIntegral index)
-      isize           <- isizeM
-      tblPtr          <- asks tableReference
-      tblRefType      <- asks tableRefType
-      castInstr       <- newNamedInstruction isize $ AST.PtrToInt funcRef isize []
-      (_, funcPtrInt) <- popOperand
-      getEltPtr       <- newNamedInstruction (Type.ptr isize) $ AST.GetElementPtr True tblPtr [zero, offset] []
-      (_, tblEltPtr)  <- popOperand
-      let storePtr = AST.Do $ AST.Store False tblEltPtr funcPtrInt Nothing 0 []
-      pure [I castInstr, I getEltPtr, I storePtr]
+    initExprST = InstrST M.empty 0 0 name [] M.empty S.empty
 
     allocStack = do
-      argTypes <- asks $ arguments . flip (M.!) ident . functionTypes
+      argTypes <- asks $ arguments . flip (M.!) name . functionTypes
       let localTypes = compileType <$> Struct.localTypes func
       pure $ foldMap alloc
            $ zip3 [0..] (argTypes ++ localTypes)
@@ -675,62 +628,64 @@ compileFunction ident func = evalInstrGen instrGen initExprST
       where
         initWithArg = [I $ AST.Do $ AST.Store False ident arg Nothing 0 []]
         allocInstr  = [I $ makeName "local" i AST.:= AST.Alloca t Nothing 0 []]
-        ident       = AST.LocalReference (Type.ptr t) name
+        ident       = AST.LocalReference (Type.ptr t) varName
         arg         = AST.LocalReference t $ makeName "arg" i
-        name        = makeName "local" i
+        varName     = makeName "local" i
 
-    sizeT int = case arch of
-                   "x86_64" -> pure $ Struct.I64Const $ fromIntegral int
-                   "i386"   -> pure $ Struct.I32Const $ fromIntegral int
-                   "ia64"   -> pure $ Struct.I64Const $ fromIntegral int
-                   "arm"    -> pure $ Struct.I32Const $ fromIntegral int
-                   _        -> throwError "not a supported architecture"
+    maybeInit = pure [I $ AST.Do $ AST.Call Nothing Conv.C [] (Right function) [] [] []]
+      where
+        function = AST.ConstantOperand
+                 $ flip Constant.GlobalReference "wasmc_initialize"
+                 $ Type.FunctionType Type.VoidType [] False
 
-    instrGen    = do
-      tell ["func def: " ++ show ident]
-      -- initialize memory if it is the main function
-      memInitInstrs                <- initMem <|> mempty
-      tblInitInstrs                <- initTbl <|> mempty
-      dropInstrs                   <- dropMem <|> mempty
-      initStack                    <- allocStack
+    instrs = do
+      tell ["func def: " ++ show name]
       -- compile function type information
-      FT { arguments, returnType } <- asks $ flip (M.!) ident . functionTypes
-      let paramList  = do
-            (i, t) <- zip [0..] arguments
-            pure $ Global.Parameter t (makeName "arg" i) []
-          parameters = (paramList, False)
-          localTypes = compileType <$> Struct.localTypes func
+      args <- asks $ arguments . flip (M.!) name . functionTypes
+      let localTypes = compileType <$> Struct.localTypes func
           localVariables = do
-            (n, t) <- zip [0..] $ arguments ++ localTypes
+            (n, t) <- zip [0..] $ args ++ localTypes
             pure (makeName "local" n, t)
       modify $ \st -> st { localVariableTypes = M.fromAscList localVariables }
-      -- compile basic blocks and collect the results
-      llvmInstrs          <- foldMap compileInstr $ Language.Wasm.Structure.body func
-      (phis, returnInstr) <- returnOperandStackItems
+      maybeInit <> allocStack
+                <> foldMap compileInstr (Language.Wasm.Structure.body func)
+
+buildFunction :: InstrGen [LLVMInstr] -> Name.Name -> ModGen (S.Set Name.Name, [Global.Global])
+buildFunction instrs name = evalInstrGen gen exprST
+  where
+    exprST = InstrST M.empty 0 0 name [] M.empty S.empty
+    gen    = do
+      tell ["func def: " ++ show name]
+      FT { arguments, returnType } <- asks $ flip (M.!) name . functionTypes
+      instrs'             <- instrs
       externFs            <- gets externalFuncs
+      (phis, returnInstr) <- returnIf returnType
       let blks = splitAfter isTerm
                $ appendIfLast (not . isRet) (T returnInstr)
-               $ memInitInstrs ++ tblInitInstrs ++ initStack ++ llvmInstrs ++ phis ++ dropInstrs
+               $ instrs' ++ phis
           basicBlocks = fmap (buildBlock . assignName)
                       $ zip [0..]
                       $ fromMaybe (error "empty block")
                       $ traverse unsnoc blks
+          paramList  = do
+            (i, t) <- zip [0..] arguments
+            pure $ Global.Parameter t (makeName "arg" i) []
           func = Global.functionDefaults { Global.basicBlocks
-                                         , Global.name = ident
+                                         , Global.name
                                          , Global.returnType
-                                         , Global.parameters }
+                                         , Global.parameters = (paramList, False)
+                                         }
       pure (externFs, [func])
 
-    buildBlock (name, term, instrs) = AST.BasicBlock name (unwrapI <$> instrs) (unwrapT term)
+    assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
+    buildBlock (n, t, xs) = AST.BasicBlock n (unwrapI <$> xs) (unwrapT t)
+
+    returnIf retType = if retType == Type.VoidType
+                  then pure ([], AST.Do $ AST.Ret Nothing [])
+                  else returnOperandStackItems
 
     isRet (T (AST.Do (AST.Ret _ _))) = True
     isRet _                          = False
-
-    unwrapT (T t) = t
-    unwrapT instr = error $ "Not an LLVM terminator: " ++ show instr
-
-    unwrapI (I i) = i
-    unwrapI term  = error $ "Not an LLVM instruction: " ++ show term
 
 -- FIXME: use linear memory
 -- globals in the WASM sense of the term
@@ -816,14 +771,87 @@ compileModule wasmMod = do
                                                  , Global.initializer = Just $ Constant.Int wordWidth 0
                                                  }
 
+      statusRef = AST.ConstantOperand
+                $ flip Constant.GlobalReference "wasmc.initialization_status"
+                $ Type.ptr Type.i1
+      initializationStatus = AST.globalVariableDefaults { Global.name = "wasmc.initialization_status"
+                                                        , Global.type' = Type.i1
+                                                        , Global.initializer = Just $ Constant.Int 1 0
+                                                        }
+
+      sizeT int = case arch of
+                     "x86_64" -> pure $ Struct.I64Const $ fromIntegral int
+                     "i386"   -> pure $ Struct.I32Const $ fromIntegral int
+                     "ia64"   -> pure $ Struct.I64Const $ fromIntegral int
+                     "arm"    -> pure $ Struct.I32Const $ fromIntegral int
+                     _        -> throwError "not a supported architecture"
+
+      initMem = do
+        minSize   <- asks memoryMinSize
+        isize     <- isizeM
+        size      <- sizeT $ minSize * 64000
+        _         <- compileInstr size
+        malloc    <- callExternal "malloc"
+        castInstr <- ptrToInt isize
+        (_, int)  <- popOperand
+        let storeInstr = AST.Do $ AST.Store False memoryReference int Nothing 0 []
+        pure $ malloc ++ castInstr ++ [I storeInstr]
+
+      initTbl = foldMap (uncurry funcRefToInt) $ M.toList tableElements
+        where
+          funcRefToInt index name = do
+            let FT { arguments, returnType } = functionTypes M.! name
+                funcRef = AST.ConstantOperand
+                        $ flip Constant.GlobalReference name
+                        $ Type.ptr
+                        $ Type.FunctionType returnType arguments False
+                zero    = AST.ConstantOperand $ Constant.Int 32 0
+                offset  = AST.ConstantOperand $ Constant.Int 32 (fromIntegral index)
+            isize           <- isizeM
+            castInstr       <- newNamedInstruction isize $ AST.PtrToInt funcRef isize []
+            (_, funcPtrInt) <- popOperand
+            getEltPtr       <- newNamedInstruction (Type.ptr isize) $ AST.GetElementPtr True tableReference [zero, offset] []
+            (_, tblEltPtr)  <- popOperand
+            let storePtr = AST.Do $ AST.Store False tblEltPtr funcPtrInt Nothing 0 []
+            pure [I castInstr, I getEltPtr, I storePtr]
+
+      checkInitStatus = do
+        blockIndex <- gets blockIdentifier
+        let loadInstr = I $ "init_status" AST.:= AST.Load False statusRef Nothing 0 []
+            pred = AST.LocalReference Type.i1 "init_status"
+            dest = makeName "block" $ blockIndex + 1
+            fallthrough = makeName "block" $ blockIndex + 2
+            ifInstr = T $ AST.Do $ AST.CondBr pred dest fallthrough []
+            doNothing = T $ AST.Do $ AST.Ret Nothing []
+        incrBlockIdentifier
+        incrBlockIdentifier
+        pure [loadInstr, ifInstr, doNothing]
+
+      setInitStatus = pure [storeInstr]
+        where
+          storeInstr = I $ AST.Do $ AST.Store False statusRef false Nothing 0 []
+
+      initFunc = buildFunction instrs "wasmc_initialize"
+        where
+          instrs = checkInitStatus <> initTbl <> initMem <> setInitStatus
+
+      dropMem = buildFunction instrs "wasmc_drop"
+        where
+          instrs = pushOperand memoryReference
+                 *> load isize
+                 <> intToPtr (Type.ptr Type.i8)
+                 <> callExternal "free"
+
       modGen = do
         globals           <- traverse (uncurry processGlobals) wasmGlobals
         -- imports <- traverse (uncurry compileImports) wasmImports
         compilationOutput <- traverse (uncurry compileFunction) wasmFuncs
-        let (decls, funcs) = mconcat compilationOutput
+        init              <- initFunc
+        drop              <- dropMem
+        let (decls, funcs) = mconcat compilationOutput <> init <> drop
             externs        = filter (flip S.member decls . Global.name) externalFunctions
 
-        let globalDefs = AST.GlobalDefinition <$> table : minMemorySize : memory : externs ++ funcs
+        let globalDefs = AST.GlobalDefinition <$> table : minMemorySize : memory : initializationStatus : externs ++ funcs
             typeDefs   = [tableTypeDef]
 
         pure $ AST.defaultModule { AST.moduleName = "basic"
@@ -846,9 +874,11 @@ compileModule wasmMod = do
     where
       startFunctionIndex  = (\(Struct.StartFunction n) -> n) <$> Struct.start wasmMod
       extractFuncType     = compileFunctionType . (Struct.types wasmMod !!) . fromIntegral . Struct.funcType
-      functionTypes       = M.fromList
-                          $ zip funcNames
-                          $ extractFuncType <$> Struct.functions wasmMod
+      functionTypes       = M.fromList $ extracted ++ wasmc
+        where
+          extracted = zip funcNames $ extractFuncType <$> Struct.functions wasmMod
+          wasmc     = [("wasmc_initialize", FT [] Type.VoidType)
+                      ,("wasmc_drop", FT [] Type.VoidType)]
       functionTypeIndices = M.fromList $ zip [0..] $ compileFunctionType <$> Struct.types wasmMod
       tableReference      = AST.ConstantOperand 
                           $ flip Constant.GlobalReference (Name.mkName "wasmc.tbl")
@@ -860,7 +890,7 @@ compileModule wasmMod = do
       wasmGlobals         = zip [0..] $ Struct.globals wasmMod
       wasmData            = Struct.datas wasmMod
       wasmFuncs           = zip funcNames $ Struct.functions wasmMod
-      funcName i          = maybe (makeName "func" i) (const "_main")
+      funcName i          = maybe (makeName "func" i) (const "main")
                           $ guard . (==i) =<< startFunctionIndex
       funcNames           = funcName <$> [0..]
       wasmElements        = Struct.elems wasmMod

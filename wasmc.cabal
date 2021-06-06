@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 3f2d4403e8b073cb5c64722be16f650ac9e052f15e5161a6f5b67f60b8ea142f
+-- hash: 35e4a6c75251cf4684cc10a3f7e30aa946db1bb3d9b1f79609ecc45039eb13b5
 
 name:           wasmc
 version:        0.1.0.0
@@ -27,9 +27,9 @@ source-repository head
 
 library
   exposed-modules:
+      Compiler
       External
       Gen
-      Lib
       Utils
   other-modules:
       Paths_wasmc
@@ -42,10 +42,15 @@ library
     , binary
     , bytestring >=0.10.8
     , containers
+    , directory
     , generic-random
     , llvm-hs-pretty
     , llvm-hs-pure
     , mtl
+    , process
+    , random
+    , tasty
+    , tasty-hunit
     , text
     , wasm >=1.0.0
   default-language: Haskell2010
@@ -63,10 +68,15 @@ executable wasmc-exe
     , binary
     , bytestring >=0.10.8
     , containers
+    , directory
     , generic-random
     , llvm-hs-pretty
     , llvm-hs-pure
     , mtl
+    , process
+    , random
+    , tasty
+    , tasty-hunit
     , text
     , wasm >=1.0.0
     , wasmc
@@ -74,8 +84,10 @@ executable wasmc-exe
 
 test-suite wasmc-test
   type: exitcode-stdio-1.0
-  main-is: Spec.hs
+  main-is: Test.hs
   other-modules:
+      Common
+      Spec
       Paths_wasmc
   hs-source-dirs:
       test
@@ -86,10 +98,15 @@ test-suite wasmc-test
     , binary
     , bytestring >=0.10.8
     , containers
+    , directory
     , generic-random
     , llvm-hs-pretty
     , llvm-hs-pure
     , mtl
+    , process
+    , random
+    , tasty
+    , tasty-hunit
     , text
     , wasm >=1.0.0
     , wasmc

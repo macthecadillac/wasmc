@@ -32,6 +32,14 @@ data LLVMInstr = I (AST.Named AST.Instruction)
                | T (AST.Named AST.Terminator)
                deriving (Show)
 
+unwrapT :: LLVMInstr -> AST.Named AST.Terminator
+unwrapT (T t) = t
+unwrapT instr = error $ "Not an LLVM terminator: " ++ show instr
+
+unwrapI :: LLVMInstr -> AST.Named AST.Instruction
+unwrapI (I i) = i
+unwrapI term  = error $ "Not an LLVM instruction: " ++ show term
+
 type NestedMap a = M.Map Name.Name (M.Map Name.Name a)
 
 data OperandStack = OpS { currentBlock :: [AST.Operand]

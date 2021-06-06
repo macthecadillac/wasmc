@@ -16,6 +16,9 @@
 @wasmc.linear_mem =    global i64 0
 
 
+@wasmc.initialization_status =    global i1 0
+
+
 declare external ccc  void @free(i8*)    
 
 
@@ -48,6 +51,7 @@ declare external ccc  i8* @malloc(i64)
 
 define external ccc  i32 @func0(i32  %arg0, i32  %arg1, i32  %arg2, i32  %arg3, i32  %arg4)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca i32 
   store  i32 %arg0, i32* %local0 
   %local1 = alloca i32 
@@ -73,6 +77,7 @@ block0:
 
 define external ccc  i32 @func1(i32  %arg0, i32  %arg1)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca i32 
   store  i32 %arg0, i32* %local0 
   %local1 = alloca i32 
@@ -110,6 +115,7 @@ block0:
 
 define external ccc  float @func2(float  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %tmp0 = load  float, float* %local0 
@@ -120,6 +126,7 @@ block0:
 
 define external ccc  float @func3(float  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %tmp0 = load  float, float* %local0 
@@ -130,6 +137,7 @@ block0:
 
 define external ccc  float @func4(float  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %tmp0 = load  float, float* %local0 
@@ -140,6 +148,7 @@ block0:
 
 define external ccc  float @func5(float  %arg0, float  %arg1, float  %arg2)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %local1 = alloca float 
@@ -160,6 +169,7 @@ block0:
 
 define external ccc  float @func6(float  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %tmp0 = load  float, float* %local0 
@@ -170,6 +180,7 @@ block0:
 
 define external ccc  float @func7(float  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %tmp0 = load  float, float* %local0 
@@ -180,6 +191,7 @@ block0:
 
 define external ccc  float @func8(float  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %tmp0 = load  float, float* %local0 
@@ -190,6 +202,7 @@ block0:
 
 define external ccc  float @func9(float  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %tmp0 = load  float, float* %local0 
@@ -200,6 +213,7 @@ block0:
 
 define external ccc  float @func10(float  %arg0, float  %arg1, float  %arg2, float  %arg3)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca float 
   store  float %arg0, float* %local0 
   %local1 = alloca float 
@@ -225,12 +239,14 @@ block0:
 
 define external ccc  i32 @func11()    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   ret i32 666 
 }
 
 
 define external ccc  i32 @func12()    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %tmp0 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 0 
   %tmp1 = load  i64, i64* %tmp0 
   %tmp2 = inttoptr i64 %tmp1 to i32 ()* 
@@ -242,6 +258,7 @@ block0:
 
 define external ccc  i32 @func13(i32  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca i32 
   store  i32 %arg0, i32* %local0 
   %tmp0 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 0 
@@ -256,6 +273,7 @@ block0:
 
 define external ccc  i32 @func14()    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %tmp0 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 1 
   %tmp1 = load  i64, i64* %tmp0 
   %tmp2 = inttoptr i64 %tmp1 to i32 ()* 
@@ -266,6 +284,7 @@ block0:
 
 define external ccc  i64 @func15(i64  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca i64 
   store  i64 %arg0, i64* %local0 
   %local1 = alloca i64 
@@ -303,6 +322,7 @@ block5:
 
 define external ccc  i32 @func16()    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %tmp0 = load  i64, i64* @wasmc.linear_mem 
   %tmp1 = inttoptr i64 %tmp0 to i8* 
   %tmp2 = getelementptr inbounds i8, i8* %tmp1, i32 0 
@@ -314,6 +334,7 @@ block0:
 
 define external ccc  i32 @func17()    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %tmp0 =  call ccc  i32  @func16()  
   %tmp1 = load  i64, i64* @wasmc.linear_mem 
   %tmp2 = inttoptr i64 %tmp1 to i8* 
@@ -327,6 +348,7 @@ block0:
 
 define external ccc  i32 @func18()    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %tmp0 =  call ccc  i32  @llvm.ctpop.i32(i32  6)  
   %tmp1 =  call ccc  i32  @llvm.cttz.i32(i32  16, i1  0)  
   %tmp2 = add   i32 %tmp0, %tmp1 
@@ -338,6 +360,7 @@ block0:
 
 define external ccc  i64 @func19(i64  %arg0)    {
 block0:
+   call ccc  void  @wasmc_initialize()  
   %local0 = alloca i64 
   store  i64 %arg0, i64* %local0 
   %local1 = alloca i64 
@@ -378,19 +401,31 @@ block4:
 }
 
 
-define external ccc  void @_main()    {
+define external ccc  void @wasmc_initialize()    {
 block0:
-  %tmp0 =  call ccc  i8*  @malloc(i64  64000)  
-  %tmp1 = ptrtoint i8* %tmp0 to i64 
-  store  i64 %tmp1, i64* @wasmc.linear_mem 
-  %tmp2 = ptrtoint i32 ()* @func11 to i64 
-  %tmp3 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 0 
+  %init_status = load  i1, i1* @wasmc.initialization_status 
+  br i1 %init_status, label %block1, label %block2 
+block1:
+  ret void 
+block2:
+  %tmp0 = ptrtoint i32 ()* @func11 to i64 
+  %tmp1 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 0 
+  store  i64 %tmp0, i64* %tmp1 
+  %tmp2 = ptrtoint i32 ()* @func12 to i64 
+  %tmp3 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 1 
   store  i64 %tmp2, i64* %tmp3 
-  %tmp4 = ptrtoint i32 ()* @func12 to i64 
-  %tmp5 = getelementptr inbounds %wasmc.tbl, %wasmc.tbl* @wasmc.tbl, i32 0, i32 1 
-  store  i64 %tmp4, i64* %tmp5 
-  %tmp6 = load  i64, i64* @wasmc.linear_mem 
-  %tmp7 = inttoptr i64 %tmp6 to i8* 
-   call ccc  void  @free(i8*  %tmp7)  
+  %tmp4 =  call ccc  i8*  @malloc(i64  64000)  
+  %tmp5 = ptrtoint i8* %tmp4 to i64 
+  store  i64 %tmp5, i64* @wasmc.linear_mem 
+  store  i1 0, i1* @wasmc.initialization_status 
+  ret void 
+}
+
+
+define external ccc  void @wasmc_drop()    {
+block0:
+  %tmp0 = load  i64, i64* @wasmc.linear_mem 
+  %tmp1 = inttoptr i64 %tmp0 to i8* 
+   call ccc  void  @free(i8*  %tmp1)  
   ret void 
 }

@@ -23,4 +23,4 @@ int func18(); /* popcount(6) + ctz(16) + clz(32) = 2 + 4 + 26 = 32 */
 
 long func19(long n);  // 0 + 1 + ... + n
 
-void _main();
+void wasmc_drop();

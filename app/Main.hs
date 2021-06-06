@@ -5,7 +5,7 @@ import qualified Data.ByteString.Lazy as B
 import Data.Either
 import Debug.Trace
 import qualified Data.Text.Lazy.IO as IO
-import Lib
+import Compiler
 import LLVM.Pretty (ppllvm)
 import System.Environment (getArgs)
 
