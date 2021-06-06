@@ -403,7 +403,8 @@ compileInstr (Struct.SetGlobal n)       = throwError "not implemented: SetGlobal
 compileInstr (Struct.TeeLocal n)        = do
   (phi, a) <- peekOperand
   let name = makeName "wasmc.local" n
-  varType  <- gets $ flip (M.!) name . localVariableTypes
+  varTypes <- gets localVariableTypes
+  varType  <- maybe (throwError $ "unknown variable: " ++ show name) pure $ M.lookup name varTypes
   let ref   = AST.LocalReference (Type.ptr varType) name
       instr = phi ++ [I $ AST.Do $ AST.Store False ref a Nothing 0 []]
   tell $ toLog "    emit: " instr
@@ -414,17 +415,17 @@ compileInstr (Struct.GetGlobal n)       = throwError "not implemented: GetGlobal
 
 compileInstr (Struct.GetLocal n)        = do
   let name = makeName "wasmc.local" n
-  varType <- gets $ flip (M.!) name . localVariableTypes
+  varTypes <- gets localVariableTypes
+  varType  <- maybe (throwError $ "unknown variable: " ++ show name) pure $ M.lookup name varTypes
   let ref = AST.LocalReference (Type.ptr varType) name
   instr   <- newNamedInstruction varType $ AST.Load False ref Nothing 0 []
   tell $ toLog "    emit: " [I instr]
   pure [I instr]
 
 compileInstr (Struct.Call i) = do
-  ModEnv { functionTypes } <- ask
-  let FT { arguments, returnType } = functionTypes M.! makeName "wasmc.func" i
-      name                         = makeName "wasmc.func" i
-      function                     = AST.ConstantOperand
+  name                         <- asks $ flip (M.!) i . functionIndexMap
+  FT { arguments, returnType } <- asks $ flip (M.!) name . functionTypes
+  let function                     = AST.ConstantOperand
                                    $ flip Constant.GlobalReference name
                                    $ Type.FunctionType returnType arguments False
   compileFunctionCall function arguments returnType
@@ -534,7 +535,7 @@ compileInstr (Struct.Loop _ body) = do
   compiled   <- foldMap compileInstr wasmInstrs
   let nextBlock = gets (makeName "block" . (+1) . blockIdentifier)
   endOfBlock <- readScope 1 <|> nextBlock
-  _          <- moveOperandStack origin (trace (show endOfBlock) endOfBlock)
+  _          <- moveOperandStack origin endOfBlock
   _          <- moveOperandStack startOfBlock endOfBlock
   popScope
   tell ["  end loop"]
@@ -617,10 +618,13 @@ compileFunction :: Name.Name -> Struct.Function -> ModGen (S.Set Name.Name, [Glo
 compileFunction name func = buildFunction instrs name
   where
     initExprST = InstrST M.empty 0 0 name [] M.empty S.empty
+    liftMaybe  = maybe (throwError $ "unknown function: " ++ show name) pure
 
     allocStack = do
-      argTypes <- asks $ arguments . flip (M.!) name . functionTypes
-      let localTypes = compileType <$> Struct.localTypes func
+      funcTypes <- asks functionTypes
+      ft        <- liftMaybe $ M.lookup name funcTypes
+      let argTypes   = arguments ft
+          localTypes = compileType <$> Struct.localTypes func
       pure $ foldMap alloc
            $ zip3 [0..] (argTypes ++ localTypes)
            $ fmap (const True) argTypes ++ repeat False
@@ -643,10 +647,12 @@ compileFunction name func = buildFunction instrs name
     instrs = do
       tell ["func def: " ++ show name]
       -- compile function type information
-      args <- asks $ arguments . flip (M.!) name . functionTypes
-      let localTypes = compileType <$> Struct.localTypes func
+      funcTypes <- asks functionTypes
+      ft        <- liftMaybe $ M.lookup name funcTypes
+      let argTypes   = arguments ft
+          localTypes = compileType <$> Struct.localTypes func
           localVariables = do
-            (n, t) <- zip [0..] $ args ++ localTypes
+            (n, t) <- zip [0..] $ argTypes ++ localTypes
             pure (makeName "wasmc.local" n, t)
       modify $ \st -> st { localVariableTypes = M.fromAscList localVariables }
       maybeInit <> allocStack
@@ -655,14 +661,16 @@ compileFunction name func = buildFunction instrs name
 buildFunction :: InstrGen [LLVMInstr] -> Name.Name -> ModGen (S.Set Name.Name, [Global.Global])
 buildFunction instrs name = evalInstrGen gen exprST
   where
-    exprST = InstrST M.empty 0 0 name [] M.empty S.empty
-    gen    = do
+    exprST    = InstrST M.empty 0 0 name [] M.empty S.empty
+    liftMaybe = maybe (throwError $ "unknown function: " ++ show name) pure
+    gen       = do
       tell ["func def: " ++ show name]
-      FT { arguments, returnType } <- asks $ flip (M.!) name . functionTypes
-      instrs'             <- instrs
-      externFs            <- gets externalFuncs
-      (phis, returnInstr) <- returnIf returnType
-      linkage             <- asks linkagePrivacy
+      funcTypes                    <- asks functionTypes
+      FT { arguments, returnType } <- liftMaybe $ M.lookup name funcTypes
+      instrs'                      <- instrs
+      externFs                     <- gets externalFuncs
+      (phis, returnInstr)          <- returnIf returnType
+      linkage                      <- asks linkagePrivacy
       let blks = splitAfter isTerm
                $ appendIfLast (not . isRet) (T returnInstr)
                $ instrs' ++ phis
@@ -754,7 +762,7 @@ compileModule wasmMod = do
                       $ Type.IntegerType wordWidth
 
       -- set up table
-      elemNames     = [makeName "wasmc.func" i | Struct.ElemSegment _ _ index <- wasmElements, i <- index]
+      elemNames     = [funcName i | Struct.ElemSegment _ _ index <- wasmElements, i <- index]
       tableElements = M.fromList $ zip [0..] elemNames
       nElems        = length elemNames
       isize         = Type.IntegerType wordWidth
@@ -813,8 +821,8 @@ compileModule wasmMod = do
       initTbl = foldMap (uncurry funcRefToInt) $ M.toList tableElements
         where
           funcRefToInt index name = do
-            let FT { arguments, returnType } = functionTypes M.! name
-                funcRef = AST.ConstantOperand
+            FT { arguments, returnType } <- liftMaybe $ M.lookup name functionTypes
+            let funcRef = AST.ConstantOperand
                         $ flip Constant.GlobalReference name
                         $ Type.ptr
                         $ Type.FunctionType returnType arguments False
@@ -827,6 +835,8 @@ compileModule wasmMod = do
             (_, tblEltPtr)  <- popOperand
             let storePtr = AST.Do $ AST.Store False tblEltPtr funcPtrInt Nothing 0 []
             pure [I castInstr, I getEltPtr, I storePtr]
+              where
+                liftMaybe = maybe (throwError $ "unknown function: " ++ show name) pure
 
       checkInitStatus = do
         blockIndex <- gets blockIdentifier
@@ -881,6 +891,7 @@ compileModule wasmMod = do
                                , tableElements
                                , tableRefType
                                , exportedFunctions
+                               , functionIndexMap
                                }
 
   evalModGen modGen initModEnv
@@ -913,6 +924,7 @@ compileModule wasmMod = do
           aux (Struct.Export name d) = (,T.unpack name) <$> getFuncIndex d
       nameFunction i      = maybe (makeName "wasmc.func" i) Name.mkName $ M.lookup i exportedFuncs
       exportedFunctions   = S.fromList $ "___wasmc__drop" : (Name.mkName <$> M.elems exportedFuncs)
+      functionIndexMap    = M.fromList $ [(i, name) | (i, (name, _)) <- zip [0..] wasmFuncs]
 
       getFuncIndex (Struct.ExportFunc i) = [i]
       getFuncIndex _                     = []

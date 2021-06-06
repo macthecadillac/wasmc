@@ -73,6 +73,7 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , tableElements :: M.Map Natural Name.Name
                      , tableRefType :: Type.Type
                      , exportedFunctions :: S.Set Name.Name
+                     , functionIndexMap :: M.Map Natural Name.Name
                     --  , globalVariableTypes :: M.Map Natural Type.Type
                       }
                      deriving (Show)

@@ -32,7 +32,7 @@ import Spec
 main :: IO ()
 main = defaultMain . testGroup "tests" . evalState (sequence tests) =<< newStdGen
     where
-      tests = [binops, unops, mathFuncs, controls]
+      tests = [binops, unops, mathFuncs, controls, loadStores, tables]
 
 binops :: State StdGen TestTree
 binops = testGroup "binop" <$> testCases
@@ -78,7 +78,19 @@ controls :: State StdGen TestTree
 controls = testGroup "controls" <$> testCases
   where
     testCases = join <$> traverse buildTestCase tests
-    tests = [ control1 ]
+    tests = [ control1, control2 ]
+
+loadStores :: State StdGen TestTree
+loadStores = testGroup "load-store" <$> testCases
+  where
+    testCases = join <$> traverse buildTestCase tests
+    tests = [ loadStore1 ]
+
+tables :: State StdGen TestTree
+tables = testGroup "table access" <$> testCases
+  where
+    testCases = join <$> traverse buildTestCase tests
+    tests = [ table1 ]
 
 rustStub :: Interface -> [([Val], Val)] -> [T.Text]
 rustStub (Interface n a r) = fmap $ T.pack . intercalate "\n" . uncurry rustSrc
