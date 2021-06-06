@@ -4,18 +4,6 @@
 #include <curses.h>
 #include "test.h"
 
-int getCell(int x, int y) {
-    return func4(x, y);
-}
-
-void setCell(int x, int y, int z) {
-    func3(x, y, z);
-}
-
-void tick() {
-    func13();
-}
-
 void render() {
     for (int y = 0; y < 50; y++) {
         mvaddch(y+1,0,'|');
@@ -54,8 +42,6 @@ int main(int argc, char *argv[]) {
   }
 
   printf("start\n");
-  _main();
-  printf("mem+tables allocated\n");
   for (int i = 0; i < seed; i++) {
     // fprintf(stderr, "setting cells\n");
     setCell(rand() % 50, rand() % 50, 1);
@@ -73,5 +59,6 @@ int main(int argc, char *argv[]) {
     //   fprintf(stderr, "tocky\n");
       sleep(1);
   }
+  ___wasmc__drop();
   endwin();
 }

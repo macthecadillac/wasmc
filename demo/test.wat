@@ -2,9 +2,20 @@
   (; (import "console" "log" (func $log (param i32) (param i32))) ;)
 
   (memory $mem 1)
-
-  (start $_main)
-
+  (export "dead" (func $dead))
+  (export "alive" (func $alive))
+  (export "offsetFromCoordinate" (func $offsetFromCoordinate))
+  (export "setCell" (func $setCell))
+  (export "getCell" (func $getCell))
+  (export "liveNeighbourCount" (func $liveNeighbourCount))
+  (export "inRange" (func $inRange))
+  (export "isCellAlive" (func $isCellAlive))
+  (export "setCellStateForNextGeneration" (func $setCellStateForNextGeneration))
+  (export "evolveCellToNextGeneration" (func $evolveCellToNextGeneration))
+  (export "increment" (func $increment))
+  (export "evolveAllCells" (func $evolveAllCells))
+  (export "promoteNextGeneration" (func $promoteNextGeneration))
+  (export "tick" (func $tick))
   (table 18 funcref)
   (elem (i32.const 0)
     ;; for cells that are currently dead
@@ -317,6 +328,4 @@
     (call $evolveAllCells)
     (call $promoteNextGeneration)
   )
-
-  (func $_main)
 )

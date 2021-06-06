@@ -840,8 +840,8 @@ compileModule wasmMod = do
 
       checkInitStatus = do
         blockIndex <- gets blockIdentifier
-        let loadInstr = I $ "wasmc.init_status" AST.:= AST.Load False statusRef Nothing 0 []
-            pred = AST.LocalReference Type.i1 "wasmc.init_status"
+        let loadInstr = I $ "wasmc.initialization_status" AST.:= AST.Load False statusRef Nothing 0 []
+            pred = AST.LocalReference Type.i1 "wasmc.initialization_status"
             dest = makeName "block" $ blockIndex + 1
             fallthrough = makeName "block" $ blockIndex + 2
             ifInstr = T $ AST.Do $ AST.CondBr pred dest fallthrough []
@@ -852,7 +852,7 @@ compileModule wasmMod = do
 
       setInitStatus = pure [storeInstr]
         where
-          storeInstr = I $ AST.Do $ AST.Store False statusRef false Nothing 0 []
+          storeInstr = I $ AST.Do $ AST.Store False statusRef true Nothing 0 []
 
       initFunc = buildFunction instrs "wasmc.initialize"
         where
