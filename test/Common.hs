@@ -4,7 +4,7 @@ import qualified Data.ByteString.Lazy as B
 
 
 data Interface = Interface String [Type] (Maybe Type)
-data Test = T Interface [Val] Val B.ByteString
+data Test = T String Interface [([Val], Val)] B.ByteString
 
 data Type = I32 | I64 | F32 | F64
   deriving (Eq)

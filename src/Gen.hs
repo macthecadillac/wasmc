@@ -72,6 +72,7 @@ data ModEnv = ModEnv { startFunctionIndex :: Maybe Natural
                      , tableReference :: AST.Operand
                      , tableElements :: M.Map Natural Name.Name
                      , tableRefType :: Type.Type
+                     , exportedFunctions :: S.Set Name.Name
                     --  , globalVariableTypes :: M.Map Natural Type.Type
                       }
                      deriving (Show)
@@ -154,7 +155,7 @@ popOperand = do
       combine ops@((x, _):_) = do
         n <- gets localIdentifier
         let opType = operandType x
-            ident  = makeName "tmp" n
+            ident  = makeName "wasmc.tmp" n
             instr  = ident AST.:= AST.Phi opType ops []
             op     = AST.LocalReference opType ident
         incrLocalIdentifier
@@ -208,7 +209,7 @@ collapseStacks n (OpS stack map) = do
       combine []                 = throwError "empty sub-stack"
       combine ops@((fstOp, _):_) = do
         n <- get
-        let ident  = makeName "tmp" n
+        let ident  = makeName "wasmc.tmp" n
             opType = operandType fstOp
             instr  = ident AST.:= AST.Phi opType ops []
             newOp  = AST.LocalReference opType ident
@@ -239,7 +240,7 @@ incrLocalIdentifier = modify $ \st -> st { localIdentifier = localIdentifier st 
 newNamedInstruction :: Type.Type -> AST.Instruction -> InstrGen (AST.Named AST.Instruction)
 newNamedInstruction Type.VoidType instr = pure $ AST.Do instr
 newNamedInstruction idType        instr = do
-  name <- gets $ makeName "tmp" . localIdentifier
+  name <- gets $ makeName "wasmc.tmp" . localIdentifier
   let identifier = AST.LocalReference idType name
   pushOperand identifier
   incrLocalIdentifier
@@ -261,7 +262,7 @@ returnOperandStackItems = do
       collapseOps ops = do
         index                        <- gets funcIdentifier
         FT { arguments, returnType } <- asks (flip (M.!) index . functionTypes)
-        let ptrIdent  = makeName "local" $ fromIntegral $ length arguments
+        let ptrIdent  = makeName "wasmc.local" $ fromIntegral $ length arguments
             ptrType   = Type.PointerType returnType $ Addr.AddrSpace 0
             ptr       = AST.LocalReference ptrType ptrIdent
             genInstr (i, op, t) = do

@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
 module Compiler where
 
 import Control.Applicative
@@ -17,6 +18,7 @@ import qualified Data.Set as S
 import qualified Data.List as L
 import Data.Maybe
 import Data.Word
+import qualified Data.Text.Lazy as T
 import Data.Tuple
 import Debug.Trace
 import Numeric.Natural
@@ -400,7 +402,7 @@ compileInstr (Struct.F64Const n)        = compileConst $ Constant.Float $ Float.
 compileInstr (Struct.SetGlobal n)       = throwError "not implemented: SetGlobal"
 compileInstr (Struct.TeeLocal n)        = do
   (phi, a) <- peekOperand
-  let name = makeName "local" n
+  let name = makeName "wasmc.local" n
   varType  <- gets $ flip (M.!) name . localVariableTypes
   let ref   = AST.LocalReference (Type.ptr varType) name
       instr = phi ++ [I $ AST.Do $ AST.Store False ref a Nothing 0 []]
@@ -411,7 +413,7 @@ compileInstr (Struct.SetLocal n)        = foldMap compileInstr [Struct.TeeLocal 
 compileInstr (Struct.GetGlobal n)       = throwError "not implemented: GetGlobal"
 
 compileInstr (Struct.GetLocal n)        = do
-  let name = makeName "local" n
+  let name = makeName "wasmc.local" n
   varType <- gets $ flip (M.!) name . localVariableTypes
   let ref = AST.LocalReference (Type.ptr varType) name
   instr   <- newNamedInstruction varType $ AST.Load False ref Nothing 0 []
@@ -420,8 +422,8 @@ compileInstr (Struct.GetLocal n)        = do
 
 compileInstr (Struct.Call i) = do
   ModEnv { functionTypes } <- ask
-  let FT { arguments, returnType } = functionTypes M.! makeName "func" i
-      name                         = makeName "func" i
+  let FT { arguments, returnType } = functionTypes M.! makeName "wasmc.func" i
+      name                         = makeName "wasmc.func" i
       function                     = AST.ConstantOperand
                                    $ flip Constant.GlobalReference name
                                    $ Type.FunctionType returnType arguments False
@@ -627,15 +629,15 @@ compileFunction name func = buildFunction instrs name
                         | otherwise = allocInstr
       where
         initWithArg = [I $ AST.Do $ AST.Store False ident arg Nothing 0 []]
-        allocInstr  = [I $ makeName "local" i AST.:= AST.Alloca t Nothing 0 []]
+        allocInstr  = [I $ makeName "wasmc.local" i AST.:= AST.Alloca t Nothing 0 []]
         ident       = AST.LocalReference (Type.ptr t) varName
         arg         = AST.LocalReference t $ makeName "arg" i
-        varName     = makeName "local" i
+        varName     = makeName "wasmc.local" i
 
     maybeInit = pure [I $ AST.Do $ AST.Call Nothing Conv.C [] (Right function) [] [] []]
       where
         function = AST.ConstantOperand
-                 $ flip Constant.GlobalReference "wasmc_initialize"
+                 $ flip Constant.GlobalReference "wasmc.initialize"
                  $ Type.FunctionType Type.VoidType [] False
 
     instrs = do
@@ -645,7 +647,7 @@ compileFunction name func = buildFunction instrs name
       let localTypes = compileType <$> Struct.localTypes func
           localVariables = do
             (n, t) <- zip [0..] $ args ++ localTypes
-            pure (makeName "local" n, t)
+            pure (makeName "wasmc.local" n, t)
       modify $ \st -> st { localVariableTypes = M.fromAscList localVariables }
       maybeInit <> allocStack
                 <> foldMap compileInstr (Language.Wasm.Structure.body func)
@@ -660,6 +662,7 @@ buildFunction instrs name = evalInstrGen gen exprST
       instrs'             <- instrs
       externFs            <- gets externalFuncs
       (phis, returnInstr) <- returnIf returnType
+      linkage             <- asks linkagePrivacy
       let blks = splitAfter isTerm
                $ appendIfLast (not . isRet) (T returnInstr)
                $ instrs' ++ phis
@@ -673,9 +676,15 @@ buildFunction instrs name = evalInstrGen gen exprST
           func = Global.functionDefaults { Global.basicBlocks
                                          , Global.name
                                          , Global.returnType
+                                         , Global.linkage
                                          , Global.parameters = (paramList, False)
                                          }
       pure (externFs, [func])
+
+    linkagePrivacy s | pred s    = Linkage.External
+                     | otherwise = Linkage.Private
+      where
+        pred = S.member name . exportedFunctions
 
     assignName (n, (t, instrs)) = (makeName "block" n, t, instrs)
     buildBlock (n, t, xs) = AST.BasicBlock n (unwrapI <$> xs) (unwrapT t)
@@ -745,7 +754,7 @@ compileModule wasmMod = do
                       $ Type.IntegerType wordWidth
 
       -- set up table
-      elemNames     = [makeName "func" i | Struct.ElemSegment _ _ index <- wasmElements, i <- index]
+      elemNames     = [makeName "wasmc.func" i | Struct.ElemSegment _ _ index <- wasmElements, i <- index]
       tableElements = M.fromList $ zip [0..] elemNames
       nElems        = length elemNames
       isize         = Type.IntegerType wordWidth
@@ -756,6 +765,7 @@ compileModule wasmMod = do
       tableGlobType = Type.NamedTypeReference $ Name.mkName "wasmc.tbl"
       table         = AST.globalVariableDefaults { Global.name = "wasmc.tbl"
                                                  , Global.type' = tableGlobType
+                                                 , Global.linkage = Linkage.Private
                                                  , Global.initializer = Just tableInit
                                                  }
 
@@ -763,11 +773,13 @@ compileModule wasmMod = do
       memoryInit    = Just $ Constant.Int wordWidth $ fromIntegral (minSize * 64000)
       minMemorySize = AST.globalVariableDefaults { Global.name = "wasmc.min_mem_size"
                                                  , Global.isConstant = True
+                                                 , Global.linkage = Linkage.Private
                                                  , Global.type' = Type.i64
                                                  , Global.initializer = memoryInit
                                                  }
       memory        = AST.globalVariableDefaults { Global.name = "wasmc.linear_mem"
                                                  , Global.type' = Type.IntegerType wordWidth
+                                                 , Global.linkage = Linkage.Private
                                                  , Global.initializer = Just $ Constant.Int wordWidth 0
                                                  }
 
@@ -776,6 +788,7 @@ compileModule wasmMod = do
                 $ Type.ptr Type.i1
       initializationStatus = AST.globalVariableDefaults { Global.name = "wasmc.initialization_status"
                                                         , Global.type' = Type.i1
+                                                        , Global.linkage = Linkage.Private
                                                         , Global.initializer = Just $ Constant.Int 1 0
                                                         }
 
@@ -817,8 +830,8 @@ compileModule wasmMod = do
 
       checkInitStatus = do
         blockIndex <- gets blockIdentifier
-        let loadInstr = I $ "init_status" AST.:= AST.Load False statusRef Nothing 0 []
-            pred = AST.LocalReference Type.i1 "init_status"
+        let loadInstr = I $ "wasmc.init_status" AST.:= AST.Load False statusRef Nothing 0 []
+            pred = AST.LocalReference Type.i1 "wasmc.init_status"
             dest = makeName "block" $ blockIndex + 1
             fallthrough = makeName "block" $ blockIndex + 2
             ifInstr = T $ AST.Do $ AST.CondBr pred dest fallthrough []
@@ -831,11 +844,11 @@ compileModule wasmMod = do
         where
           storeInstr = I $ AST.Do $ AST.Store False statusRef false Nothing 0 []
 
-      initFunc = buildFunction instrs "wasmc_initialize"
+      initFunc = buildFunction instrs "wasmc.initialize"
         where
           instrs = checkInitStatus <> initTbl <> initMem <> setInitStatus
 
-      dropMem = buildFunction instrs "wasmc_drop"
+      dropMem = buildFunction instrs "___wasmc__drop"
         where
           instrs = pushOperand memoryReference
                  *> load isize
@@ -844,7 +857,6 @@ compileModule wasmMod = do
 
       modGen = do
         globals           <- traverse (uncurry processGlobals) wasmGlobals
-        -- imports <- traverse (uncurry compileImports) wasmImports
         compilationOutput <- traverse (uncurry compileFunction) wasmFuncs
         init              <- initFunc
         drop              <- dropMem
@@ -868,6 +880,7 @@ compileModule wasmMod = do
                                , tableReference
                                , tableElements
                                , tableRefType
+                               , exportedFunctions
                                }
 
   evalModGen modGen initModEnv
@@ -877,8 +890,8 @@ compileModule wasmMod = do
       functionTypes       = M.fromList $ extracted ++ wasmc
         where
           extracted = zip funcNames $ extractFuncType <$> Struct.functions wasmMod
-          wasmc     = [("wasmc_initialize", FT [] Type.VoidType)
-                      ,("wasmc_drop", FT [] Type.VoidType)]
+          wasmc     = [("wasmc.initialize", FT [] Type.VoidType)
+                      ,("___wasmc__drop", FT [] Type.VoidType)]
       functionTypeIndices = M.fromList $ zip [0..] $ compileFunctionType <$> Struct.types wasmMod
       tableReference      = AST.ConstantOperand 
                           $ flip Constant.GlobalReference (Name.mkName "wasmc.tbl")
@@ -890,10 +903,19 @@ compileModule wasmMod = do
       wasmGlobals         = zip [0..] $ Struct.globals wasmMod
       wasmData            = Struct.datas wasmMod
       wasmFuncs           = zip funcNames $ Struct.functions wasmMod
-      funcName i          = maybe (makeName "func" i) (const "main")
+      funcName i          = maybe (nameFunction i) (const "main")
                           $ guard . (==i) =<< startFunctionIndex
       funcNames           = funcName <$> [0..]
       wasmElements        = Struct.elems wasmMod
+      wasmExports         = Struct.exports wasmMod
+      exportedFuncs       = M.fromList $ foldMap aux wasmExports
+        where
+          aux (Struct.Export name d) = (,T.unpack name) <$> getFuncIndex d
+      nameFunction i      = maybe (makeName "wasmc.func" i) Name.mkName $ M.lookup i exportedFuncs
+      exportedFunctions   = S.fromList $ "___wasmc__drop" : (Name.mkName <$> M.elems exportedFuncs)
+
+      getFuncIndex (Struct.ExportFunc i) = [i]
+      getFuncIndex _                     = []
 
 --  wasmImports         = zip [0..] $ Struct.imports wasmMod
 

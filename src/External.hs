@@ -45,8 +45,8 @@ llvmIntrinsicsTypes = M.fromList [("llvm.fabs.f32", FT [Type.float] Type.float)
 libcFunctionTypes :: M.Map String FunctionType
 libcFunctionTypes = M.fromList [("malloc", FT [Type.i64] (Type.ptr Type.i8))
                                ,("free", FT [Type.ptr Type.i8] Type.void)
-                               ,("roundeven", FT [Type.float] Type.float)
-                               ,("roundevenf", FT [Type.double] Type.double)
+                               ,("roundeven", FT [Type.double] Type.double)
+                               ,("roundevenf", FT [Type.float] Type.float)
                                ,("printf", FT [Type.ptr Type.i8] Type.i32)
                                ]
 
