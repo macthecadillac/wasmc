@@ -156,7 +156,7 @@ popOperand = do
       combine ops@((x, _):_) = do
         n <- gets localIdentifier
         let opType = operandType x
-            ident  = makeName "wasmc.tmp" n
+            ident  = Name.UnName $ fromIntegral n
             instr  = ident AST.:= AST.Phi opType ops []
             op     = AST.LocalReference opType ident
         incrLocalIdentifier
@@ -210,7 +210,7 @@ collapseStacks n (OpS stack map) = do
       combine []                 = throwError "empty sub-stack"
       combine ops@((fstOp, _):_) = do
         n <- get
-        let ident  = makeName "wasmc.tmp" n
+        let ident  = Name.UnName $ fromIntegral n
             opType = operandType fstOp
             instr  = ident AST.:= AST.Phi opType ops []
             newOp  = AST.LocalReference opType ident
@@ -241,7 +241,7 @@ incrLocalIdentifier = modify $ \st -> st { localIdentifier = localIdentifier st 
 newNamedInstruction :: Type.Type -> AST.Instruction -> InstrGen (AST.Named AST.Instruction)
 newNamedInstruction Type.VoidType instr = pure $ AST.Do instr
 newNamedInstruction idType        instr = do
-  name <- gets $ makeName "wasmc.tmp" . localIdentifier
+  name <- gets $ Name.UnName . fromIntegral . localIdentifier
   let identifier = AST.LocalReference idType name
   pushOperand identifier
   incrLocalIdentifier
