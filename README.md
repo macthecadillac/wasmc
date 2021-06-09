@@ -1,5 +1,5 @@
 # wasmc
-A fucking awesome WASM compiler using LLVM. To run, `stack run -- test.wat` and then `llc --filetype=obj test.ll` and `clang test.o -o test`.
+A WASM compiler using LLVM. To run, `stack run -- test.wat` and then `llc --filetype=obj test.ll` and `clang test.o -o test`.
 
 
 # https://bcain-llvm.readthedocs.io/projects/clang/en/latest/Toolchain/
